@@ -38,6 +38,7 @@
 | 2026-09-20 | 用户插件目录 `%USERPROFILE%\plugins\deepseek-balance`（安装副本） | 开机自启快捷方式指向安装副本而不是 Codex 插件缓存副本，只改缓存会让改动在重启后失效 | 把 `scripts/widget.ps1`、`README.md`、`data.md`、`.gitignore` 同步到安装副本，并把 git 仓库（`.git`）移到该目录，作为插件项目的主副本 |
 | 2026-09-20 | `scripts/widget.ps1`（`Start-PressAnimation`、`MouseLeftButtonDown` 处理器） | 用户反馈「弹动要长按才出现，应该点一下就触发、松手恢复原状」。实测按住鼠标 300ms 期间两次抓图逐像素完全相同，确认 `DragMove()` 的模态循环期间分层窗口不刷新，按下时启动的 0.12 秒压扁动画画不出来，松手后才一次性补上 | `Start-PressAnimation` 改为按下瞬间直接写入形变值（`ScaleY 0.88`、`ScaleX = ±1.05`）并用 `Dispatcher.Invoke(Render)` 强制刷新一帧，保证点一下立刻压扁；删掉上一版「等压扁跑满 120ms 再回弹」的 `ClickBounceTimer` 逻辑，改为松手立即回弹复原。顺带修掉按压动画把 `ScaleX` 固定写成正值、导致吸到左边界（整体镜像）时鲸鱼会被翻回正向的问题 |
 | 2026-09-20 | `README.md` | 同步新交互描述 | 「交互」改为：按下瞬间鲸鱼就压扁（Q 弹 + 音效），松手回弹复原，不需要长按或先拖动 |
+| 2026-09-20 | `scripts/widget.ps1`（音效部分：`New-SoundPlayer`、新增 `Get-SoundPool`/`Warm-SoundPool`、`Play-Sound`） | 用户反馈「改成按下即压扁之后音效播放不全」。旧实现每次触发都对同一个 `MediaPlayer` 做 `Stop`/`Close`/`Open`，并在 `MediaOpened` 回调里再 `Play` 一次：刚开始播放的声音会被随后的 `Open` 或这次重复 `Play` 打断、从头重放，快速连点时同类音效也会互相截断 | 改为常驻播放器池：每种音效准备 3 个 `MediaPlayer`，文件只 `Open` 一次，触发时 `Position=0` + `Play`，同类音效按顺序轮换、互不打断；文件尚未打开时改由 `MediaOpened` 回调补播，不再紧跟 `Open` 立即 `Play`；新增鼠标移入挂件时预热播放器（`Warm-SoundPool`），首次点击也能从头出声；`DEEPSEEK_WIDGET_DEBUG_SOUND=1` 时增加 `MediaEnded` 日志，用于确认音效整段播完 |
 
 ## 未纳入本次改动
 

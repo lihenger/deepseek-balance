@@ -473,41 +473,71 @@ if (Test-Path -LiteralPath $WhalePng) {
 
 $script:SoundDebug = ($env:DEEPSEEK_WIDGET_DEBUG_SOUND -eq '1')
 
-# 播放器不在进程启动时创建：自启是在登录时拉起的，那时音频栈可能还没就绪，
-# 早建的 MediaPlayer 可能一直是哑的。改成首次点击时按需创建，失败后丢弃重建。
-$script:PressPlayer = $null
-$script:ReleasePlayer = $null
+# 播放器仍按需创建（自启是在登录时拉起的，那时音频栈可能还没就绪，早建的播放器会一直是哑的），
+# 但创建后常驻复用：文件只 Open 一次，之后每次触发只做 Position=0 + Play。
+# 旧实现每次触发都 Stop/Close/Open 同一个 MediaPlayer，并在 MediaOpened 回调里再 Play 一次，
+# 刚开始的声音会被随后的 Open 或重复 Play 打断，听起来就是"播放不全"。
+# 同一类音效准备 3 个播放器轮换，连续点击时前后两次不会互相截断。
+$script:SoundPool = @{}
+$script:SoundPoolCursor = @{}
+$script:SoundReady = @{}
+$script:SoundPending = @{}
+$script:SoundPoolSize = 3
 
 function New-SoundPlayer {
-    param([string]$Kind)
+    param([string]$File)
     $player = New-Object System.Windows.Media.MediaPlayer
+    $player.Volume = [double]$script:Cfg.volume
     $player.add_MediaOpened({
         param($sender, $eventArgs)
-        try {
-            $sender.Volume = [double]$script:Cfg.volume
-            $sender.Play()
-            if ($script:SoundDebug) { Write-Log ('音效已开始: ' + $sender.Source) }
-        } catch {
-            Write-Log ('音效启动失败: ' + $_.Exception.Message)
+        $script:SoundReady[$sender] = $true
+        if ($script:SoundPending.ContainsKey($sender)) {
+            $script:SoundPending.Remove($sender)
+            try {
+                $sender.Position = [TimeSpan]::Zero
+                $sender.Play()
+                if ($script:SoundDebug) { Write-Log ('音效已开始: ' + $sender.Source) }
+            } catch {
+                Write-Log ('音效启动失败: ' + $_.Exception.Message)
+            }
         }
     })
-    $failed = {
+    $player.add_MediaFailed({
         param($sender, $eventArgs)
-        Write-Log ('音效播放失败: ' + $eventArgs.ErrorException.Message + ' (' + $sender.Source + ')；下次点击会重建播放器')
-        if ($Kind -eq 'press') { $script:PressPlayer = $null } else { $script:ReleasePlayer = $null }
-    }.GetNewClosure()
-    $player.add_MediaFailed($failed)
+        Write-Log ('音效播放失败: ' + $eventArgs.ErrorException.Message + ' (' + $sender.Source + ')')
+    })
+    $player.add_MediaEnded({
+        # 排障用：确认音效整段播完（没有中途被打断）
+        if ($script:SoundDebug) { Write-Log ('音效播放结束: ' + $sender.Source) }
+    })
+    $player.Open((New-Object System.Uri $File))
     return $player
 }
 
-function Get-SoundPlayer {
-    param([string]$Kind)
-    if ($Kind -eq 'press') {
-        if (-not $script:PressPlayer) { $script:PressPlayer = New-SoundPlayer -Kind 'press' }
-        return $script:PressPlayer
+function Get-SoundPool {
+    param([string]$Key, [string]$File)
+    if (-not $script:SoundPool.ContainsKey($Key)) {
+        $players = New-Object System.Collections.ArrayList
+        for ($i = 0; $i -lt $script:SoundPoolSize; $i++) {
+            [void]$players.Add((New-SoundPlayer -File $File))
+        }
+        $script:SoundPool[$Key] = $players
+        $script:SoundPoolCursor[$Key] = 0
     }
-    if (-not $script:ReleasePlayer) { $script:ReleasePlayer = New-SoundPlayer -Kind 'release' }
-    return $script:ReleasePlayer
+    return ,$script:SoundPool[$Key]
+}
+
+function Warm-SoundPool {
+    # 鼠标移到挂件上时先把当前音效集加载好，首次点击也能从头出声
+    if (-not $script:Cfg.sound) { return }
+    $set = $SoundSets[$script:Cfg.soundSet]
+    if (-not $set) { return }
+    foreach ($kind in @('press', 'release')) {
+        $file = Join-Path $AssetsDir $set[$kind]
+        if (Test-Path -LiteralPath $file) {
+            [void](Get-SoundPool -Key ($script:Cfg.soundSet + ':' + $kind) -File $file)
+        }
+    }
 }
 
 # ---------------------------------------------------------------- 状态同步
@@ -551,15 +581,22 @@ function Play-Sound {
         Write-Log ('音效文件缺失: ' + $file)
         return
     }
-    $player = Get-SoundPlayer -Kind $Kind
+    $key = $script:Cfg.soundSet + ':' + $Kind
+    $players = Get-SoundPool -Key $key -File $file
+    $index = ([int]$script:SoundPoolCursor[$key] + $players.Count) % $players.Count
+    $script:SoundPoolCursor[$key] = $index + 1
+    $player = $players[$index]
     try {
-        $player.Stop()
-        $player.Close()
         $player.Volume = [double]$script:Cfg.volume
-        $player.Open((New-Object System.Uri $file))
-        # Open 之后立刻 Play 在部分机器上会被丢弃，MediaOpened 回调里还会再 Play 一次
-        $player.Play()
-        if ($script:SoundDebug) { Write-Log ('请求播放(' + $Kind + '): ' + $file) }
+        if ($script:SoundReady.ContainsKey($player)) {
+            $player.Position = [TimeSpan]::Zero
+            $player.Play()
+            if ($script:SoundDebug) { Write-Log ('播放音效({0} #{1}): {2}' -f $Kind, $index, (Split-Path $file -Leaf)) }
+        } else {
+            # 文件还在打开：交给 MediaOpened 回调补播，避免这次的 Play 被丢弃
+            $script:SoundPending[$player] = $true
+            if ($script:SoundDebug) { Write-Log ('等待音效就绪({0} #{1}): {2}' -f $Kind, $index, (Split-Path $file -Leaf)) }
+        }
     } catch {
         Write-Log ('音效请求异常: ' + $_.Exception.Message)
     }
@@ -1054,6 +1091,11 @@ function Start-ReleaseAnimation {
     $bodyScale.BeginAnimation([System.Windows.Media.ScaleTransform]::ScaleYProperty, $animY)
     $bodyScale.BeginAnimation([System.Windows.Media.ScaleTransform]::ScaleXProperty, $animX)
 }
+
+# 鼠标移到挂件上就预热播放器：首次点击时不必等文件打开，从头出声
+$window.Add_MouseEnter({
+    Warm-SoundPool
+})
 
 $window.Add_MouseLeftButtonDown({
     param($sender, $eventArgs)
