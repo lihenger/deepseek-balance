@@ -45,6 +45,8 @@
 | 2026-09-20 | `scripts/widget.ps1`（XAML `TextGroup`/新增 `TextStack`、`Set-LineStyle`、新增 `Fit-TextGroup`、新增 `$script:TextBoxWidth`/`TextBoxHeight`、`Apply-Lines`） | 用户反馈「有的文案在气泡中有遮挡」。搭测试台把 22 种文案逐个渲染成 PNG 后确认两类溢出：①超长金额（如 `¥ 1234567.89`，128 号字）宽约 787 画布单位，超过气泡可用宽并被窗口右边缘裁掉；②长台词换行后因为 `Line2` 固定 `LineHeight=134`（字号才 66），三行高达 402 画布单位，顶出 300 高的文字框、被气泡描边盖住 | 文字区由 560×300 且靠下（中心 266）改为气泡椭圆的内接矩形 480×280、中心与气泡一致（454,247）；`Set-LineStyle` 按字号 1.1 倍设置行高、换行宽度改用 `TextBoxWidth`；新增 `Fit-TextGroup` 在每次排版后测量整块文字，超框时对 `TextStack` 施加等比 `LayoutTransform` 缩小（短文案不受影响） |
 | 2026-09-20 | 验证记录（无代码改动） | 确认排版修复 | 测试台 22 个用例（5 档金额 + 6 位/9 位大额、3 套峰谷文案、全部随机台词、gif 兜底）在 1.5 与 0.6 两种缩放下都完整落在气泡内；测试台脚本在 `work/wtest/`（不进插件仓库） |
 | 2026-09-20 | `README.md` | 补充排版规则 | 「悬浮挂件」小节新增「文案排版」说明：内接矩形 480×280、行高 1.1 倍、超框自动等比缩小 |
+| 2026-09-20 | `scripts/widget.ps1`（`Set-Mirror`、`Start-ReleaseAnimation`、`MouseLeftButtonDown` 拖动分支） | 用户反馈「拖动挂件后一直保持压缩状态，无法回弹」。根因：上一版把按压形变直接写进 `bodyScale` 基值（`ScaleY=0.88`），而拖动结束时 `Settle-Window` → `Set-Mirror` 会清掉动画并回落到基值，于是永远停在压扁状态 | `Set-Mirror` 复位 `ScaleY = 1`（它是静止状态的唯一出口）；`Start-ReleaseAnimation` 的两个动画都显式写出 `From`（0.88→1.0、±1.05→±1.0），基点被复位后仍能弹出完整回弹；拖动分支改为先 `Settle-Window`/保存位置、再播回弹与释放音效，避免动画被 `Set-Mirror` 清掉 |
+| 2026-09-20 | 验证记录（无代码改动） | 确认修复 | 测试台新增 `DEEPSEEK_WIDGET_DEBUG_SCALE=1` 定时记录 `bodyScale`：修复前模拟拖动后日志停在 `Y=0.880`，修复后回到 `X=1.000 Y=1.000`；拖到左侧吸附后为 `X=-1.000 Y=1.000`（镜像正常且未压缩）；单击后同样回到 `Y=1.000` |
 
 ## 未纳入本次改动
 

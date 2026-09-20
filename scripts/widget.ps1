@@ -1161,6 +1161,9 @@ function Set-Mirror {
     $bodyScale.BeginAnimation([System.Windows.Media.ScaleTransform]::ScaleXProperty, $null)
     $bodyScale.BeginAnimation([System.Windows.Media.ScaleTransform]::ScaleYProperty, $null)
     $bodyScale.ScaleX = if ($mirrored) { -1 } else { 1 }
+    # 按压会把 ScaleY 直接写成 0.88，这里是"静止状态"的唯一出口：
+    # 不复位的话，拖动结束清掉动画后鲸鱼就一直卡在压扁状态。
+    $bodyScale.ScaleY = 1
     $textMirror.ScaleX = if ($mirrored) { -1 } else { 1 }
 }
 
@@ -1223,9 +1226,11 @@ function Start-ReleaseAnimation {
     $ease = New-Object System.Windows.Media.Animation.BackEase
     $ease.EasingMode = 'EaseOut'
     $ease.Amplitude = 0.56
-    $animY = New-Object System.Windows.Media.Animation.DoubleAnimation (1.0, $duration)
+    # 显式写出 From：拖动结束时先执行 Settle-Window/Set-Mirror（会清动画并把形变复位），
+    # 只写 To 的话没有起点可弹。
+    $animY = New-Object System.Windows.Media.Animation.DoubleAnimation (0.88, 1.0, $duration)
     $animY.EasingFunction = $ease
-    $animX = New-Object System.Windows.Media.Animation.DoubleAnimation ($targetX, $duration)
+    $animX = New-Object System.Windows.Media.Animation.DoubleAnimation ((1.05 * $targetX), $targetX, $duration)
     $animX.EasingFunction = $ease
     $bodyScale.BeginAnimation([System.Windows.Media.ScaleTransform]::ScaleYProperty, $animY)
     $bodyScale.BeginAnimation([System.Windows.Media.ScaleTransform]::ScaleXProperty, $animX)
@@ -1264,17 +1269,19 @@ $window.Add_MouseLeftButtonDown({
     $startTop = [double]$window.Top
     try { $window.DragMove() } catch { }
     $moved = ([Math]::Abs([double]$window.Left - $startLeft) -gt 3) -or ([Math]::Abs([double]$window.Top - $startTop) -gt 3)
-    # 松手立即复原（回弹动画），不额外等待
-    Start-ReleaseAnimation
-    Play-Sound 'release'
     if ($moved) {
         $script:Cfg.left = [double]$window.Left
         $script:Cfg.top = [double]$window.Top
         Update-Snap
-        Settle-Window
+        Settle-Window          # 内部会 Set-Mirror（清动画 + 复位形变），所以回弹必须放它后面
         Save-WidgetState $script:Cfg
+        Start-ReleaseAnimation
+        Play-Sound 'release'
         return
     }
+    # 松手立即复原（回弹动画），不额外等待
+    Start-ReleaseAnimation
+    Play-Sound 'release'
     if ($insideBubble) {
         if ($script:RandomActive) {
             Hide-Bubble
