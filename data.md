@@ -36,6 +36,8 @@
 | 2026-09-20 | 仓库根（新增 `.gitignore`） | 用户要求把整个插件发布到 GitHub 私有仓库 | 初始化 git 仓库（分支 `main`）并新增 `.gitignore`，忽略 `*.log`/`*.pid`/`widget-snapshot.png`/`widget.json` 这些运行期产物 |
 | 2026-09-20 | GitHub：`lihenger/deepseek-balance`（private） | 用户要求上传到自己的 GitHub 并设为 private | 创建私有仓库并推送全部 18 个文件；因本机到 `github.com` 的 git 通道被重置，改用 `api.github.com` 的 git 数据接口直传对象，远端 commit sha 与本地 HEAD 完全一致（`8b3b2c3`） |
 | 2026-09-20 | 用户插件目录 `%USERPROFILE%\plugins\deepseek-balance`（安装副本） | 开机自启快捷方式指向安装副本而不是 Codex 插件缓存副本，只改缓存会让改动在重启后失效 | 把 `scripts/widget.ps1`、`README.md`、`data.md`、`.gitignore` 同步到安装副本，并把 git 仓库（`.git`）移到该目录，作为插件项目的主副本 |
+| 2026-09-20 | `scripts/widget.ps1`（`Start-PressAnimation`、`MouseLeftButtonDown` 处理器） | 用户反馈「弹动要长按才出现，应该点一下就触发、松手恢复原状」。实测按住鼠标 300ms 期间两次抓图逐像素完全相同，确认 `DragMove()` 的模态循环期间分层窗口不刷新，按下时启动的 0.12 秒压扁动画画不出来，松手后才一次性补上 | `Start-PressAnimation` 改为按下瞬间直接写入形变值（`ScaleY 0.88`、`ScaleX = ±1.05`）并用 `Dispatcher.Invoke(Render)` 强制刷新一帧，保证点一下立刻压扁；删掉上一版「等压扁跑满 120ms 再回弹」的 `ClickBounceTimer` 逻辑，改为松手立即回弹复原。顺带修掉按压动画把 `ScaleX` 固定写成正值、导致吸到左边界（整体镜像）时鲸鱼会被翻回正向的问题 |
+| 2026-09-20 | `README.md` | 同步新交互描述 | 「交互」改为：按下瞬间鲸鱼就压扁（Q 弹 + 音效），松手回弹复原，不需要长按或先拖动 |
 
 ## 未纳入本次改动
 

@@ -321,7 +321,6 @@ $script:RollTo = 0.0
 $script:RollStartAt = Get-Date
 $script:RollDurationMs = 700
 $script:BubbleTimer = $null
-$script:ClickBounceTimer = $null
 $script:GifTimer = $null
 $script:GifFrames = $null
 $script:GifIndex = 0
@@ -1031,15 +1030,15 @@ function Update-Snap {
 # ---------------------------------------------------------------- 交互
 
 function Start-PressAnimation {
-    $duration = [TimeSpan]::FromSeconds(0.12)
-    $ease = New-Object System.Windows.Media.Animation.CubicEase
-    $ease.EasingMode = 'EaseOut'
-    $animY = New-Object System.Windows.Media.Animation.DoubleAnimation (0.88, $duration)
-    $animY.EasingFunction = $ease
-    $animX = New-Object System.Windows.Media.Animation.DoubleAnimation (1.05, $duration)
-    $animX.EasingFunction = $ease
-    $bodyScale.BeginAnimation([System.Windows.Media.ScaleTransform]::ScaleYProperty, $animY)
-    $bodyScale.BeginAnimation([System.Windows.Media.ScaleTransform]::ScaleXProperty, $animX)
+    # 按下即压扁。不能只启动一段动画：紧跟其后的 DragMove() 会进入模态循环，
+    # 分层窗口在此期间不刷新，动画画不出来，松手后才一次性看到结果（表现为"要长按才触发"）。
+    # 所以这里直接写入形变值并强制渲染一帧，保证点一下就能看到压扁，松手再由回弹动画复原。
+    $mirror = if ($script:Cfg.snapH -eq 'left') { -1 } else { 1 }
+    $bodyScale.BeginAnimation([System.Windows.Media.ScaleTransform]::ScaleYProperty, $null)
+    $bodyScale.BeginAnimation([System.Windows.Media.ScaleTransform]::ScaleXProperty, $null)
+    $bodyScale.ScaleY = 0.88
+    $bodyScale.ScaleX = 1.05 * $mirror
+    [void]$window.Dispatcher.Invoke([Action] {}, [System.Windows.Threading.DispatcherPriority]::Render)
 }
 
 function Start-ReleaseAnimation {
@@ -1072,30 +1071,13 @@ $window.Add_MouseLeftButtonDown({
     }
     Play-Sound 'press'
     Start-PressAnimation
-    $pressedAt = Get-Date
     $startLeft = [double]$window.Left
     $startTop = [double]$window.Top
     try { $window.DragMove() } catch { }
     $moved = ([Math]::Abs([double]$window.Left - $startLeft) -gt 3) -or ([Math]::Abs([double]$window.Top - $startTop) -gt 3)
-    # 按压动画 120ms：单击通常十几毫秒就松手，立刻回弹等于看不见，
-    # 所以点击（未移动）时等按压动画跑满再回弹；拖动仍保持松手即回弹。
-    $pressRest = 120 - [int]((Get-Date) - $pressedAt).TotalMilliseconds
-    if ((-not $moved) -and ($pressRest -gt 0)) {
-        if ($script:ClickBounceTimer) { $script:ClickBounceTimer.Stop() }
-        $bounceTimer = New-Object System.Windows.Threading.DispatcherTimer
-        $bounceTimer.Interval = [TimeSpan]::FromMilliseconds($pressRest)
-        $bounceTimer.Add_Tick({
-            $script:ClickBounceTimer.Stop()
-            $script:ClickBounceTimer = $null
-            Start-ReleaseAnimation
-            Play-Sound 'release'
-        })
-        $script:ClickBounceTimer = $bounceTimer
-        $bounceTimer.Start()
-    } else {
-        Start-ReleaseAnimation
-        Play-Sound 'release'
-    }
+    # 松手立即复原（回弹动画），不额外等待
+    Start-ReleaseAnimation
+    Play-Sound 'release'
     if ($moved) {
         $script:Cfg.left = [double]$window.Left
         $script:Cfg.top = [double]$window.Top
