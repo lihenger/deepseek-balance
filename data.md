@@ -35,6 +35,7 @@
 | 2026-09-20 | `README.md` | 用户要求 README 标注引用的开源项目，并同步新交互 | 开头段落与「悬浮挂件」小节写明引用 [MeteorNOX/DeepSeek-Balance-Whale-Widget](https://github.com/MeteorNOX/DeepSeek-Balance-Whale-Widget)（MIT）；新增「引用与致谢」小节；「交互」补上单击即有 Q 弹，另加「命中范围」说明 |
 | 2026-09-20 | 仓库根（新增 `.gitignore`） | 用户要求把整个插件发布到 GitHub 私有仓库 | 初始化 git 仓库（分支 `main`）并新增 `.gitignore`，忽略 `*.log`/`*.pid`/`widget-snapshot.png`/`widget.json` 这些运行期产物 |
 | 2026-09-20 | GitHub：`lihenger/deepseek-balance`（private） | 用户要求上传到自己的 GitHub 并设为 private | 创建私有仓库并推送全部 18 个文件；因本机到 `github.com` 的 git 通道被重置，改用 `api.github.com` 的 git 数据接口直传对象，远端 commit sha 与本地 HEAD 完全一致（`8b3b2c3`） |
+| 2026-09-20 | 用户插件目录 `%USERPROFILE%\plugins\deepseek-balance`（安装副本） | 开机自启快捷方式指向安装副本而不是 Codex 插件缓存副本，只改缓存会让改动在重启后失效 | 把 `scripts/widget.ps1`、`README.md`、`data.md`、`.gitignore` 同步到安装副本，并把 git 仓库（`.git`）移到该目录，作为插件项目的主副本 |
 
 ## 未纳入本次改动
 
