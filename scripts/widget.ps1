@@ -304,6 +304,10 @@ Add-Type -Namespace DeepSeekWidget -Name NativeMethods -MemberDefinition @'
 
 $script:Cfg = Read-WidgetState
 $script:BaseSize = 320
+# 气泡文案可用区：白色气泡是椭圆（中心 454,247，半轴约 355×214），
+# 取它的内接矩形 480×280 作为文字区，文案超框时再整体等比缩小
+$script:TextBoxWidth = 480.0
+$script:TextBoxHeight = 280.0
 $script:BubbleOpen = $false
 $script:RandomActive = $false
 $script:RandomLines = $null
@@ -400,12 +404,12 @@ $xaml = @'
                    Fill="#FFFFFF" Stroke="#203170" StrokeThickness="18"/>
           <Image x:Name="GifImage" Canvas.Left="293.8" Canvas.Top="106" Width="320" Height="320"
                  Visibility="Collapsed" Stretch="Uniform"/>
-          <Grid x:Name="TextGroup" Canvas.Left="173.8" Canvas.Top="116" Width="560" Height="300" Opacity="0"
+          <Grid x:Name="TextGroup" Canvas.Left="214" Canvas.Top="107" Width="480" Height="280" Opacity="0"
                 RenderTransformOrigin="0.5,0.5">
             <Grid.RenderTransform>
               <ScaleTransform x:Name="TextMirror" ScaleX="1" ScaleY="1"/>
             </Grid.RenderTransform>
-            <StackPanel VerticalAlignment="Center" HorizontalAlignment="Stretch">
+            <StackPanel x:Name="TextStack" VerticalAlignment="Center" HorizontalAlignment="Stretch">
               <TextBlock x:Name="Line1" TextAlignment="Center" FontSize="66" FontWeight="SemiBold"
                          Foreground="#536ba9" Text="DeepSeek 余额"/>
               <TextBlock x:Name="Line2" TextAlignment="Center" FontSize="128" FontWeight="Bold"
@@ -448,6 +452,7 @@ $line2 = $window.FindName('Line2')
 $line3 = $window.FindName('Line3')
 $gifImage = $window.FindName('GifImage')
 $whaleImage = $window.FindName('WhaleImage')
+$textStack = $window.FindName('TextStack')
 $whaleHit = $window.FindName('WhaleHit')
 $bubbleHit = $window.FindName('BubbleHit')
 
@@ -794,15 +799,31 @@ function Set-LineStyle {
         'C' { $Block.FontSize = 56; $Block.FontWeight = 'Normal'; $Block.Foreground = '#9fb0d9'; $Block.Width = [double]::NaN }
         default { $Block.FontSize = 66; $Block.FontWeight = 'SemiBold'; $Block.Foreground = '#536ba9'; $Block.Width = [double]::NaN }
     }
+    # 行高必须跟着字号走：固定行高（原来的 134）配 66 号字的换行文案会撑高一大截，
+    # 三行就顶出气泡被描边盖住。
+    $Block.LineHeight = [Math]::Round([double]$Block.FontSize * 1.1)
     if ($Style -eq 'C') { $Block.Margin = '0,9,0,0' } else { $Block.Margin = '0' }
     if ($Wrap) {
         $Block.TextWrapping = 'Wrap'
-        $Block.Width = 560
+        $Block.Width = $script:TextBoxWidth
         $Block.TextAlignment = 'Center'
     } else {
         $Block.TextWrapping = 'NoWrap'
     }
     if ($Color) { $Block.Foreground = $Color }
+}
+
+function Fit-TextGroup {
+    # 文案整体超出气泡内接矩形时等比缩小，避免压到描边或被窗口边缘裁掉
+    if (-not $textStack) { return }
+    $textStack.LayoutTransform = $null
+    $textStack.Measure((New-Object System.Windows.Size([double]::PositiveInfinity, [double]::PositiveInfinity)))
+    $size = $textStack.DesiredSize
+    if ($size.Width -le 0 -or $size.Height -le 0) { return }
+    $scale = [Math]::Min(1.0, [Math]::Min(($script:TextBoxWidth / $size.Width), ($script:TextBoxHeight / $size.Height)))
+    if ($scale -lt 0.999) {
+        $textStack.LayoutTransform = New-Object System.Windows.Media.ScaleTransform($scale, $scale)
+    }
 }
 
 function Apply-Lines {
@@ -832,6 +853,7 @@ function Apply-Lines {
             $block.Text = ''
         }
     }
+    Fit-TextGroup
 }
 
 function New-SingleCenter {
