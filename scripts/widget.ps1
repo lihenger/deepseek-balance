@@ -545,6 +545,61 @@ function Warm-SoundPool {
     }
 }
 
+# ---------------------------------------------------------------- 音频唤醒保持
+
+# 蓝牙耳机/音箱空闲一段时间后会休眠，重新唤醒要 100~500ms 才出声，
+# 而挂件音效只有 95~264ms，开头就被设备吞掉，听起来就是"只能听到后半段"。
+# 这里循环播放一段数字静音（0.5 秒、8kHz、16bit 单声道，全 0 采样），
+# 让音频设备一直保持活动状态；关掉「音效」开关会同时停掉它。
+$script:KeepAlivePlayer = $null
+$script:KeepAliveStream = $null
+
+function New-SilenceWavStream {
+    $rate = 8000
+    $dataBytes = [int]($rate * 0.5) * 2
+    $ms = New-Object System.IO.MemoryStream
+    $bw = New-Object System.IO.BinaryWriter($ms)
+    $bw.Write([char[]]'RIFF'); $bw.Write([int](36 + $dataBytes)); $bw.Write([char[]]'WAVE')
+    $bw.Write([char[]]'fmt '); $bw.Write([int]16); $bw.Write([int16]1); $bw.Write([int16]1)
+    $bw.Write([int]$rate); $bw.Write([int]($rate * 2)); $bw.Write([int16]2); $bw.Write([int16]16)
+    $bw.Write([char[]]'data'); $bw.Write([int]$dataBytes)
+    $bw.Write((New-Object byte[] $dataBytes))
+    $bw.Flush()
+    $ms.Position = 0
+    return $ms
+}
+
+function Start-SoundKeepAlive {
+    if ($script:KeepAlivePlayer) { return }
+    if (-not $script:Cfg.sound) { return }
+    try {
+        $stream = New-SilenceWavStream
+        try {
+            $player = New-Object System.Media.SoundPlayer($stream)
+        } catch {
+            Add-Type -AssemblyName System.Windows.Extensions -ErrorAction Stop
+            $player = New-Object System.Media.SoundPlayer($stream)
+        }
+        $player.PlayLooping()
+        $script:KeepAlivePlayer = $player
+        $script:KeepAliveStream = $stream
+        Write-Log '音频唤醒保持：静音循环已启动'
+    } catch {
+        Write-Log ('音频唤醒保持启动失败: ' + $_.Exception.Message)
+    }
+}
+
+function Stop-SoundKeepAlive {
+    if (-not $script:KeepAlivePlayer) { return }
+    try { $script:KeepAlivePlayer.Stop() } catch { }
+    $script:KeepAlivePlayer = $null
+    if ($script:KeepAliveStream) {
+        try { $script:KeepAliveStream.Dispose() } catch { }
+        $script:KeepAliveStream = $null
+    }
+    Write-Log '音频唤醒保持：已停止'
+}
+
 # ---------------------------------------------------------------- 状态同步
 
 function Sync-Menu {
@@ -1154,9 +1209,17 @@ function Start-ReleaseAnimation {
     $bodyScale.BeginAnimation([System.Windows.Media.ScaleTransform]::ScaleXProperty, $animX)
 }
 
-# 鼠标移到挂件上就预热播放器：首次点击时不必等文件打开，从头出声
+# 鼠标移到挂件上才开始音频唤醒保持：蓝牙设备在没有声音时会休眠，
+# 只有光标停在挂件上（即将点击）时才需要让它保持活动，平时不占用设备、不额外耗电。
+# 同时预热播放器，首次点击时不必等文件打开。
 $window.Add_MouseEnter({
     Warm-SoundPool
+    Start-SoundKeepAlive
+})
+
+# 光标离开即停掉静音循环，避免蓝牙设备一直处于活动状态耗电
+$window.Add_MouseLeave({
+    Stop-SoundKeepAlive
 })
 
 $window.Add_MouseLeftButtonDown({
@@ -1235,6 +1298,11 @@ $volumeSlider.Add_ValueChanged({
 
 $soundItem.Add_Click({
     $script:Cfg.sound = [bool]$soundItem.IsChecked
+    if ($script:Cfg.sound) {
+        if ($window.IsMouseOver) { Start-SoundKeepAlive }
+    } else {
+        Stop-SoundKeepAlive
+    }
     Save-WidgetState $script:Cfg
 })
 
@@ -1310,6 +1378,7 @@ $refreshItem.Add_Click({
 $exitItem.Add_Click({ $window.Close() })
 
 $window.Add_Closed({
+    Stop-SoundKeepAlive
     Save-WidgetState $script:Cfg
     Remove-Item -LiteralPath $PidFile -Force -ErrorAction SilentlyContinue
     Write-Log 'window closed'

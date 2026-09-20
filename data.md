@@ -40,6 +40,8 @@
 | 2026-09-20 | `README.md` | 同步新交互描述 | 「交互」改为：按下瞬间鲸鱼就压扁（Q 弹 + 音效），松手回弹复原，不需要长按或先拖动 |
 | 2026-09-20 | `scripts/widget.ps1`（音效部分：`New-SoundPlayer`、新增 `Get-SoundPool`/`Warm-SoundPool`、`Play-Sound`） | 用户反馈「改成按下即压扁之后音效播放不全」。旧实现每次触发都对同一个 `MediaPlayer` 做 `Stop`/`Close`/`Open`，并在 `MediaOpened` 回调里再 `Play` 一次：刚开始播放的声音会被随后的 `Open` 或这次重复 `Play` 打断、从头重放，快速连点时同类音效也会互相截断 | 改为常驻播放器池：每种音效准备 3 个 `MediaPlayer`，文件只 `Open` 一次，触发时 `Position=0` + `Play`，同类音效按顺序轮换、互不打断；文件尚未打开时改由 `MediaOpened` 回调补播，不再紧跟 `Open` 立即 `Play`；新增鼠标移入挂件时预热播放器（`Warm-SoundPool`），首次点击也能从头出声；`DEEPSEEK_WIDGET_DEBUG_SOUND=1` 时增加 `MediaEnded` 日志，用于确认音效整段播完 |
 | 2026-09-20 | `scripts/widget.ps1`（音效部分：新增 `Play-SoundFile`/`Get-SoundLengthMs`，改写 `Play-Sound`） | 用户反馈「只能听到后半段声音」。用 WASAPI 音频会话峰值表在独立进程里复刻挂件播放逻辑实测：`D1.mp3`(95ms, 峰值 0.317) 与 `D2.mp3`(178ms, 峰值 0.664) 在快速点击时只隔 60ms 就重叠，前一段音量只有后一段的一半，很容易被盖住；软件层本身没有截断（冷启动/空闲 30 秒后/线程阻塞 60ms 三种情况下两段都完整播放） | 松开音效改为等按下那一声整段放完（加 30ms 衔接）再播放，用 `Get-SoundLengthMs` 从播放器读实际时长、用 `DispatcherTimer` 排期；拖动等长按场景下按下音效早已放完，仍是松手即响；新的按下动作会作废上一次未播放的松开音效 |
+| 2026-09-20 | `scripts/widget.ps1`（音效部分：新增 `New-SilenceWavStream`/`Start-SoundKeepAlive`/`Stop-SoundKeepAlive`、`MouseEnter`/`MouseLeave` 处理器、音效开关处理器） | 用户确认使用蓝牙设备，音效缺失由设备休眠唤醒导致；用户要求「音频唤醒放在鼠标悬停时再开启，不要常开以免增加设备耗电」 | 光标移到挂件上（`MouseEnter`）时开始循环播放一段内存里生成的 0.5 秒数字静音（8kHz/16bit/单声道全 0 采样），让蓝牙设备保持活动；光标移开（`MouseLeave`）立即停止；关掉音效开关会同时停掉；窗口关闭时兜底停止 |
+| 2026-09-20 | `README.md` | 补充用户可感知的新行为 | 「悬浮挂件」小节新增「蓝牙/无线音频设备」说明：悬停期间用数字静音保持设备活动、移开即停，不额外耗电 |
 
 ## 未纳入本次改动
 
