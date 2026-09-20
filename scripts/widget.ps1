@@ -482,6 +482,11 @@ $script:SoundPool = @{}
 $script:SoundPoolCursor = @{}
 $script:SoundReady = @{}
 $script:SoundPending = @{}
+$script:SoundLength = @{}
+$script:LastPressAt = $null
+$script:LastPressLengthMs = 150.0
+$script:ReleaseTimer = $null
+$script:PendingRelease = $null
 $script:SoundPoolSize = 3
 
 function New-SoundPlayer {
@@ -561,6 +566,43 @@ function Sync-Menu {
 
 # ---------------------------------------------------------------- 声音
 
+function Play-SoundFile {
+    # 从播放器池里取一个播放器把整段放出来
+    param([string]$Key, [string]$File, [string]$Label)
+    $players = Get-SoundPool -Key $Key -File $File
+    $index = ([int]$script:SoundPoolCursor[$Key] + $players.Count) % $players.Count
+    $script:SoundPoolCursor[$Key] = $index + 1
+    $player = $players[$index]
+    try {
+        $player.Volume = [double]$script:Cfg.volume
+        if ($script:SoundReady.ContainsKey($player)) {
+            $player.Position = [TimeSpan]::Zero
+            $player.Play()
+            if ($script:SoundDebug) { Write-Log ('播放音效({0} #{1}): {2}' -f $Label, $index, (Split-Path $File -Leaf)) }
+        } else {
+            # 文件还在打开：交给 MediaOpened 回调补播，避免这次的 Play 被丢弃
+            $script:SoundPending[$player] = $true
+            if ($script:SoundDebug) { Write-Log ('等待音效就绪({0} #{1}): {2}' -f $Label, $index, (Split-Path $File -Leaf)) }
+        }
+        return $player
+    } catch {
+        Write-Log ('音效请求异常: ' + $_.Exception.Message)
+        return $null
+    }
+}
+
+function Get-SoundLengthMs {
+    param([string]$Key, $Player)
+    if ($script:SoundLength.ContainsKey($Key)) { return [double]$script:SoundLength[$Key] }
+    try {
+        if ($Player -and $Player.NaturalDuration.HasTimeSpan) {
+            $ms = $Player.NaturalDuration.TimeSpan.TotalMilliseconds
+            if ($ms -gt 0) { $script:SoundLength[$Key] = $ms; return $ms }
+        }
+    } catch { }
+    return 150.0   # 播放器还没就绪时的保守估计
+}
+
 function Play-Sound {
     param([string]$Kind)
     if (-not $script:Cfg.sound) {
@@ -582,24 +624,44 @@ function Play-Sound {
         return
     }
     $key = $script:Cfg.soundSet + ':' + $Kind
-    $players = Get-SoundPool -Key $key -File $file
-    $index = ([int]$script:SoundPoolCursor[$key] + $players.Count) % $players.Count
-    $script:SoundPoolCursor[$key] = $index + 1
-    $player = $players[$index]
-    try {
-        $player.Volume = [double]$script:Cfg.volume
-        if ($script:SoundReady.ContainsKey($player)) {
-            $player.Position = [TimeSpan]::Zero
-            $player.Play()
-            if ($script:SoundDebug) { Write-Log ('播放音效({0} #{1}): {2}' -f $Kind, $index, (Split-Path $file -Leaf)) }
-        } else {
-            # 文件还在打开：交给 MediaOpened 回调补播，避免这次的 Play 被丢弃
-            $script:SoundPending[$player] = $true
-            if ($script:SoundDebug) { Write-Log ('等待音效就绪({0} #{1}): {2}' -f $Kind, $index, (Split-Path $file -Leaf)) }
-        }
-    } catch {
-        Write-Log ('音效请求异常: ' + $_.Exception.Message)
+
+    if ($Kind -eq 'press') {
+        # 新的按下动作作废掉上一次还没响的松开音效
+        if ($script:ReleaseTimer) { $script:ReleaseTimer.Stop(); $script:ReleaseTimer = $null }
+        $script:PendingRelease = $null
+        $player = Play-SoundFile -Key $key -File $file -Label $Kind
+        $script:LastPressAt = [DateTime]::Now
+        $script:LastPressLengthMs = Get-SoundLengthMs -Key $key -Player $player
+        return
     }
+
+    # 松开音效：等按下那一整段放完（留 30ms 衔接）再响。
+    # 闪一下的短按里，两段同时播会把前面那段盖掉，听起来就像"只有后半段"。
+    $delayMs = 0.0
+    if ($script:LastPressAt) {
+        $elapsed = ([DateTime]::Now - $script:LastPressAt).TotalMilliseconds
+        $delayMs = $script:LastPressLengthMs + 30 - $elapsed
+    }
+    if ($delayMs -gt 25) {
+        if ($script:ReleaseTimer) { $script:ReleaseTimer.Stop() }
+        $script:PendingRelease = @{ Key = $key; File = $file; Label = $Kind }
+        $timer = New-Object System.Windows.Threading.DispatcherTimer
+        $timer.Interval = [TimeSpan]::FromMilliseconds([int]$delayMs)
+        $timer.Add_Tick({
+            $script:ReleaseTimer.Stop()
+            $script:ReleaseTimer = $null
+            if ($script:PendingRelease) {
+                $pending = $script:PendingRelease
+                $script:PendingRelease = $null
+                [void](Play-SoundFile -Key $pending.Key -File $pending.File -Label $pending.Label)
+            }
+        })
+        $script:ReleaseTimer = $timer
+        $timer.Start()
+        if ($script:SoundDebug) { Write-Log ('松开音效延后 {0:N0}ms 播放（等按下那声放完）' -f $delayMs) }
+        return
+    }
+    [void](Play-SoundFile -Key $key -File $file -Label $Kind)
 }
 
 # ---------------------------------------------------------------- GIF
