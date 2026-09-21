@@ -83,6 +83,9 @@ function Get-DefaultState {
         bubbleOn  = $true
         trayOnly  = $false
         trayNotify = $true
+        balanceAlert = 5
+        dailyBudget  = 0
+        peakNotice   = $true
     }
 }
 
@@ -332,6 +335,13 @@ $script:GifFrames = $null
 $script:GifIndex = 0
 $script:SnapshotTimer = $null
 $script:LastHint = $null
+$script:Runtime = $null
+$script:PeakInfo = $null
+$script:PeakTick = $null
+$script:LastPeakNoticeKey = $null
+$script:LastPeakPreKey = $null
+$script:LastBalanceAlertAt = $null
+$script:LastBudgetAlertDate = $null
 
 $xaml = @'
 <Window xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
@@ -370,6 +380,21 @@ $xaml = @'
         <MenuItem x:Name="PeakDefault" Header="默认" IsCheckable="True" IsChecked="True"/>
         <MenuItem x:Name="PeakLiangwen" Header="梁文峰谷" IsCheckable="True"/>
         <MenuItem x:Name="PeakQiangqiang" Header="!?强强?!" IsCheckable="True"/>
+      </MenuItem>
+      <MenuItem Header="告警">
+        <MenuItem x:Name="AlertBalanceOff" Header="余额告警：关" IsCheckable="True"/>
+        <MenuItem x:Name="AlertBalance3" Header="余额告警：¥3" IsCheckable="True"/>
+        <MenuItem x:Name="AlertBalance5" Header="余额告警：¥5" IsCheckable="True" IsChecked="True"/>
+        <MenuItem x:Name="AlertBalance10" Header="余额告警：¥10" IsCheckable="True"/>
+        <MenuItem x:Name="AlertBalance20" Header="余额告警：¥20" IsCheckable="True"/>
+        <Separator/>
+        <MenuItem x:Name="BudgetOff" Header="今日预算：关" IsCheckable="True" IsChecked="True"/>
+        <MenuItem x:Name="Budget1" Header="今日预算：¥1" IsCheckable="True"/>
+        <MenuItem x:Name="Budget3" Header="今日预算：¥3" IsCheckable="True"/>
+        <MenuItem x:Name="Budget5" Header="今日预算：¥5" IsCheckable="True"/>
+        <MenuItem x:Name="Budget10" Header="今日预算：¥10" IsCheckable="True"/>
+        <Separator/>
+        <MenuItem x:Name="PeakNoticeItem" Header="峰谷切换提醒" IsCheckable="True" IsChecked="True"/>
       </MenuItem>
       <Separator/>
       <MenuItem x:Name="BubbleItem" Header="气泡" IsCheckable="True" IsChecked="True"/>
@@ -478,6 +503,17 @@ $modeToken = $window.FindName('ModeToken')
 $peakDefault = $window.FindName('PeakDefault')
 $peakLiangwen = $window.FindName('PeakLiangwen')
 $peakQiangqiang = $window.FindName('PeakQiangqiang')
+$alertBalanceOff = $window.FindName('AlertBalanceOff')
+$alertBalance3 = $window.FindName('AlertBalance3')
+$alertBalance5 = $window.FindName('AlertBalance5')
+$alertBalance10 = $window.FindName('AlertBalance10')
+$alertBalance20 = $window.FindName('AlertBalance20')
+$budgetOff = $window.FindName('BudgetOff')
+$budget1 = $window.FindName('Budget1')
+$budget3 = $window.FindName('Budget3')
+$budget5 = $window.FindName('Budget5')
+$budget10 = $window.FindName('Budget10')
+$peakNoticeItem = $window.FindName('PeakNoticeItem')
 $bubbleItem = $window.FindName('BubbleItem')
 $trayOnlyItem = $window.FindName('TrayOnlyItem')
 $autostartItem = $window.FindName('AutostartItem')
@@ -646,6 +682,7 @@ function Stop-SoundKeepAlive {
 $EventsFile = Join-Path $StateDir 'events.json'
 $script:NoticeDedup = @{}
 $script:NoticeLevels = @{ red = $false; orange = $false; blue = $false }
+$script:NoticeClearTimers = @{}
 $script:TrayIcon = $null
 $script:TrayMenu = $null
 
@@ -706,12 +743,28 @@ function Show-Notice {
         [string]$Level = 'orange',
         [string]$Key = 'general',
         [string]$Title = 'DeepSeek 余额挂件',
-        [string]$Text = ''
+        [string]$Text = '',
+        [int]$ClearAfterSeconds = 0
     )
     Add-NoticeEvent -Level $Level -Key $Key -Title $Title -Text $Text
     $script:NoticeLevels[$Level] = $true
     Update-NoticeBadge
     Write-Log ('通知[{0}/{1}] {2} {3}' -f $Level, $Key, $Title, $Text)
+    if ($ClearAfterSeconds -gt 0) {
+        # 纯提示类通知（例如峰谷切换）过一会儿自动收回角标，避免一直亮着
+        $levelName = $Level
+        if ($script:NoticeClearTimers[$levelName]) {
+            try { $script:NoticeClearTimers[$levelName].Stop() } catch { }
+        }
+        $timer = New-Object System.Windows.Threading.DispatcherTimer
+        $timer.Interval = [TimeSpan]::FromSeconds($ClearAfterSeconds)
+        $timer.Add_Tick({
+            try { $script:NoticeClearTimers[$levelName].Stop() } catch { }
+            Clear-NoticeLevel -Level $levelName
+        }.GetNewClosure())
+        $script:NoticeClearTimers[$levelName] = $timer
+        $timer.Start()
+    }
     if (-not $script:Cfg.trayNotify) { return }
     $now = Get-Date
     $last = $script:NoticeDedup[$Key]
@@ -805,6 +858,82 @@ function Initialize-TrayIcon {
 
 # ---------------------------------------------------------------- 状态同步
 
+# ---------------------------------------------------------------- 峰谷提醒与阈值告警
+
+function Show-PeakBubble {
+    param([bool]$IsPeak)
+    $texts = Get-PeakTexts
+    $label = if ($IsPeak) { $texts.peak } else { $texts.off }
+    $color = if ($IsPeak) { '#e0433f' } else { '#2fa24c' }
+    $today = if ($null -ne $script:TodayUsage) { Format-Money $script:TodayUsage $script:ShownCurrency } else { '--' }
+    $script:RandomActive = $false
+    $script:RandomLines = $null
+    Show-Bubble -Lines @(
+        @{ t = '峰谷切换'; s = 'A'; c = ''; w = $false },
+        @{ t = $label; s = 'P'; c = $color; w = $false },
+        @{ t = ('今日已用 ' + $today); s = 'C'; c = ''; w = $false }
+    )
+}
+
+function Test-PeakNotice {
+    if (-not $script:Cfg.peakNotice) { return }
+    $info = $script:PeakInfo
+    if (-not $info -or -not $info.nextChangeAtSec) { return }
+    $changeAt = [DateTimeOffset]::FromUnixTimeSeconds([long]$info.nextChangeAtSec).LocalDateTime
+    $seconds = ($changeAt - (Get-Date)).TotalSeconds
+    $toLabel = if ($info.nextIsPeak) { '高峰价' } else { '谷价' }
+    $fromLabel = if ($info.nextIsPeak) { '谷价' } else { '高峰价' }
+
+    if ($seconds -le 0) {
+        if ($seconds -lt -300) { return }   # 睡过头太久就不补报了
+        $key = 'peak-switch:' + $info.nextChangeAtSec
+        if ($script:LastPeakNoticeKey -eq $key) { return }
+        $script:LastPeakNoticeKey = $key
+        Show-Notice -Level 'blue' -Key $key -Title ('已进入' + $toLabel) -Text ('现在起按' + $toLabel + '计费') -ClearAfterSeconds 60
+        Show-PeakBubble -IsPeak ([bool]$info.nextIsPeak)
+        return
+    }
+
+    $preKey = 'peak-pre:' + $info.nextChangeAtSec
+    if ($seconds -le 900 -and $script:LastPeakPreKey -ne $preKey) {
+        $script:LastPeakPreKey = $preKey
+        $minutes = [Math]::Max(1, [Math]::Round($seconds / 60))
+        Show-Notice -Level 'blue' -Key $preKey -Title ('{0} 分钟后进入{1}' -f $minutes, $toLabel) `
+            -Text ('当前为{0}，可以安排跑量' -f $fromLabel) -ClearAfterSeconds 60
+    }
+}
+
+function Test-Alerts {
+    $balance = $script:ShownBalance
+    $alert = [double]$script:Cfg.balanceAlert
+    if ($alert -gt 0 -and $null -ne $balance -and [double]$balance -le $alert) {
+        $script:NoticeLevels['red'] = $true
+        Update-NoticeBadge
+        $now = Get-Date
+        if (-not $script:LastBalanceAlertAt -or (($now - $script:LastBalanceAlertAt).TotalHours -ge 6)) {
+            $script:LastBalanceAlertAt = $now
+            $extra = ''
+            if ($script:Runtime -and $script:Runtime.estimatedHours -and [double]$script:Runtime.estimatedHours -lt 24) {
+                $extra = '；按当前速率预计不足 1 天'
+            }
+            Show-Notice -Level 'red' -Key 'alert:balance' -Title '余额不足' `
+                -Text ('余额 ¥{0:N2} 已低于告警线 ¥{1:N2}{2}' -f [double]$balance, $alert, $extra)
+        }
+    }
+
+    $budget = [double]$script:Cfg.dailyBudget
+    if ($budget -gt 0 -and $null -ne $script:TodayUsage -and [double]$script:TodayUsage -ge $budget) {
+        $script:NoticeLevels['orange'] = $true
+        Update-NoticeBadge
+        $today = Get-Date -Format 'yyyy-MM-dd'
+        if ($script:LastBudgetAlertDate -ne $today) {
+            $script:LastBudgetAlertDate = $today
+            Show-Notice -Level 'orange' -Key 'alert:budget' -Title '今日预算已超' `
+                -Text ('今日已用 ¥{0:N2}，已超过预算 ¥{1:N2}' -f [double]$script:TodayUsage, $budget)
+        }
+    }
+}
+
 function Sync-Menu {
     $script:SyncingMenu = $true
     $scaleSlider.Value = $script:Cfg.scale
@@ -817,6 +946,19 @@ function Sync-Menu {
     $peakDefault.IsChecked = ($script:Cfg.peakMode -eq 'default')
     $peakLiangwen.IsChecked = ($script:Cfg.peakMode -eq 'liangwen')
     $peakQiangqiang.IsChecked = ($script:Cfg.peakMode -eq 'qiangqiang')
+    $balanceAlert = [int]$script:Cfg.balanceAlert
+    $alertBalanceOff.IsChecked = ($balanceAlert -le 0)
+    $alertBalance3.IsChecked = ($balanceAlert -eq 3)
+    $alertBalance5.IsChecked = ($balanceAlert -eq 5)
+    $alertBalance10.IsChecked = ($balanceAlert -eq 10)
+    $alertBalance20.IsChecked = ($balanceAlert -eq 20)
+    $dailyBudget = [int]$script:Cfg.dailyBudget
+    $budgetOff.IsChecked = ($dailyBudget -le 0)
+    $budget1.IsChecked = ($dailyBudget -eq 1)
+    $budget3.IsChecked = ($dailyBudget -eq 3)
+    $budget5.IsChecked = ($dailyBudget -eq 5)
+    $budget10.IsChecked = ($dailyBudget -eq 10)
+    $peakNoticeItem.IsChecked = [bool]$script:Cfg.peakNotice
     $bubbleItem.IsChecked = [bool]$script:Cfg.bubbleOn
     $trayOnlyItem.IsChecked = [bool]$script:Cfg.trayOnly
     $autostartItem.IsChecked = (Test-Path -LiteralPath $ShortcutPath)
@@ -1155,7 +1297,19 @@ function Get-HintText {
     }
     if ($script:ShownBalance -eq $null) { return '加载中…' }
     $today = if ($null -ne $script:TodayUsage) { Format-Money $script:TodayUsage $script:ShownCurrency } else { '--' }
-    return ('今日已用 ' + $today)
+    return ('今日已用 ' + $today + (Format-RuntimeText))
+}
+
+function Format-RuntimeText {
+    # 续航预估：按最近小时分桶（或今日均值）算出的可用时长
+    $runtime = $script:Runtime
+    if (-not $runtime -or -not $runtime.ratePerHour) { return '' }
+    $hours = $runtime.estimatedHours
+    if ($null -eq $hours) { return '' }
+    $hours = [double]$hours
+    if ($hours -ge (24 * 365)) { return ' · 可用一年以上' }
+    if ($hours -ge 48) { return (' · 可用约 {0} 天' -f [Math]::Floor($hours / 24)) }
+    return (' · 可用约 {0} 小时' -f [Math]::Max(1, [Math]::Round($hours)))
 }
 
 # ---------------------------------------------------------------- 气泡开关动画
@@ -1171,8 +1325,9 @@ function New-FadeAnimation {
 }
 
 function Show-Bubble {
+    param($Lines = $null)
     if (-not $script:Cfg.bubbleOn) { return }
-    Set-DefaultLines
+    if ($Lines) { Apply-Lines -Lines $Lines } else { Set-DefaultLines }
     $script:BubbleOpen = $true
     # 气泡出现后，气泡那片区域才纳入命中范围
     $bubbleHit.Visibility = 'Visible'
@@ -1327,8 +1482,12 @@ function Complete-BalanceRefresh {
                 $script:ShownCurrency = $newCurrency
                 $script:TodayUsage = $payload.todayUsage.amount
                 $script:IsPeak = [bool]$payload.isPeak
+                $script:Runtime = $payload.runtime
+                $script:PeakInfo = $payload.peak
                 Animate-Amount $newBalance
                 Render-Balance
+                Test-Alerts
+                Test-PeakNotice
                 foreach ($warning in @($payload.warnings)) {
                     if ($warning) { Write-Log ('警告: ' + $warning) }
                 }
@@ -1644,6 +1803,44 @@ $peakQiangqiang.Add_Click({
     Save-WidgetState $script:Cfg
 })
 
+foreach ($pair in @(
+        @{ Name = 'AlertBalanceOff'; Value = 0 },
+        @{ Name = 'AlertBalance3'; Value = 3 },
+        @{ Name = 'AlertBalance5'; Value = 5 },
+        @{ Name = 'AlertBalance10'; Value = 10 },
+        @{ Name = 'AlertBalance20'; Value = 20 })) {
+    $menuItem = $window.FindName($pair.Name)
+    $alertValue = $pair.Value
+    $menuItem.Add_Click({
+        $script:Cfg.balanceAlert = $alertValue
+        $script:LastBalanceAlertAt = $null
+        Sync-Menu
+        Save-WidgetState $script:Cfg
+        Test-Alerts
+    }.GetNewClosure())
+}
+
+foreach ($pair in @(
+        @{ Name = 'BudgetOff'; Value = 0 },
+        @{ Name = 'Budget1'; Value = 1 },
+        @{ Name = 'Budget3'; Value = 3 },
+        @{ Name = 'Budget5'; Value = 5 },
+        @{ Name = 'Budget10'; Value = 10 })) {
+    $menuItem = $window.FindName($pair.Name)
+    $budgetValue = $pair.Value
+    $menuItem.Add_Click({
+        $script:Cfg.dailyBudget = $budgetValue
+        Sync-Menu
+        Save-WidgetState $script:Cfg
+        Test-Alerts
+    }.GetNewClosure())
+}
+
+$peakNoticeItem.Add_Click({
+    $script:Cfg.peakNotice = [bool]$peakNoticeItem.IsChecked
+    Save-WidgetState $script:Cfg
+})
+
 $bubbleItem.Add_Click({
     $script:Cfg.bubbleOn = [bool]$bubbleItem.IsChecked
     if (-not $script:Cfg.bubbleOn) { Hide-Bubble }
@@ -1728,6 +1925,11 @@ $window.Add_Loaded({
     Start-BalanceRefresh
     $script:RefreshTimer.Start()
     $script:RefreshPump.Start()
+    # 峰谷切换用 30 秒心跳检查：睡眠/重启后错过精确时刻也能补上
+    $script:PeakTick = New-Object System.Windows.Threading.DispatcherTimer
+    $script:PeakTick.Interval = [TimeSpan]::FromSeconds(30)
+    $script:PeakTick.Add_Tick({ Test-PeakNotice })
+    $script:PeakTick.Start()
     Initialize-TrayIcon
     if ($script:Cfg.trayOnly) {
         Hide-FloatingWindow

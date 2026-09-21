@@ -56,6 +56,9 @@
 | 2026-09-21 | `scripts/widget.ps1`（XAML 新增 `NoticeBadge`/`TrayOnlyItem`、`Apply-Scale`、新增 通知与角标 段、新增 托盘图标 段、`Sync-Menu`、`Closed`） | 阶段 2：托盘图标与统一通知通道 | 新增 `NotifyIcon`（图标由 `assets/DSniang1.png` 生成）：双击切换悬浮窗、右键 立即刷新/开机自启/只留托盘/退出，退出时 `Dispose`；新增 `trayOnly`/`trayNotify` 配置并持久化；新增统一通知入口 `Show-Notice -Level -Key -Title -Text`：写 `events.json`（最多 50 条）+ 角标 + 托盘气泡，同 Key 10 分钟内只弹一次气泡（跳过时写日志）；角标为鲸鱼右上角圆点，按 红>橙>蓝 优先级取色，随镜像联动、不改变窗口尺寸 |
 | 2026-09-21 | `docs/接口文档.md`、`README.md` | 阶段 2 配套文档 | 接口文档补 `trayOnly`/`trayNotify` 字段与 `events.json` 说明、取数关系补 `peak`/`runtime`；README 补「托盘与通知」小节 |
 | 2026-09-21 | 验证记录（无代码改动） | 阶段 2 验收 | 测试台 `DEEPSEEK_WIDGET_TEST_NOTICE=1` 触发 4 条通知（含 1 条同 Key 重复）：日志出现 `托盘图标已创建`、4 条 `通知[...]` 与 1 条 `10 分钟内已弹过托盘，跳过气泡`；`events.json` 生成 4 条记录（最新在前）；快照模式（`DEEPSEEK_WIDGET_CAPTURE=1`）下角标红点显示在鲸鱼右上角，位置经一次微调后贴合头部 |
+| 2026-09-21 | `scripts/widget.ps1`（新增 峰谷提醒与阈值告警 段、`Format-RuntimeText`、`Get-HintText`、`Show-Bubble -Lines`、菜单新增「告警」子菜单、`Complete-BalanceRefresh`） | 阶段 3：续航预估展示 + 峰谷切换提醒 + 阈值告警 | 气泡第三行改为 `今日已用 ¥x.xx · 可用约 N 天`（<24 小时显示小时、>365 天显示"一年以上"，无数据显示原样）；`Complete-BalanceRefresh` 记录 `payload.runtime`/`payload.peak`，成功一次后调用 `Test-Alerts` 与 `Test-PeakNotice`；峰谷提醒用 30 秒心跳检查 `peak.nextChangeAtSec`，切换前 15 分钟与切换瞬间各提醒一次（切换时额外弹峰谷气泡）；阈值告警按 `balanceAlert`（默认 ¥5，6 小时内不重复）与 `dailyBudget`（默认关，当天只提醒一次）判定，档位在右键菜单「告警」里选并持久化 |
+| 2026-09-21 | `docs/接口文档.md`、`README.md` | 阶段 3 配套文档 | 接口文档补 `balanceAlert`/`dailyBudget`/`peakNotice` 字段；README 补「续航与提醒」小节 |
+| 2026-09-21 | 验证记录（无代码改动） | 阶段 3 验收 | 测试台种子账本（3 个小时分桶 + 今日已用 2.0）并写 `balanceAlert=999`、`dailyBudget=0.5`、注入 `peak` 为"20 秒后切换"与"刚切换"：日志依次出现 `通知[red/alert:balance] 余额不足 余额 ¥30.77 已低于告警线 ¥999.00`、`通知[orange/alert:budget] 今日预算已超`、`通知[blue/peak-pre] 1 分钟后进入高峰价`、`通知[blue/peak-switch] 已进入高峰价`，`events.json` 4 条齐全；注入 `runtime` 后快照显示第三行为 `今日已用 ¥ 12.34 · 可用约 4 天` 且在气泡内 |
 
 ## 未纳入本次改动
 
