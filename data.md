@@ -65,6 +65,8 @@
 | 2026-09-21 | `scripts/widget.ps1`（新增 `Get-GitHubToken`/`Test-PluginUpdate`/`Start-UpdateCheckTimer`，菜单新增「自动检查更新」与「有新版本」，状态新增 `updateCheck`） | 阶段 5：自动更新检查（只提示，不自动更新） | 启动 2 分钟后首查、之后每 6 小时一次；凭据顺序 `GITHUB_TOKEN` → `git credential fill`（本机已存凭据，改用"写请求文件 + cmd 重定向"写法，因为 Windows PowerShell 5.1 用管道喂 stdin 会被 git 判为缺 protocol 字段）→ 都没有则只写日志；比对本地插件仓库 HEAD 与 `api.github.com/repos/lihenger/deepseek-balance/commits/main`，不一致时发蓝色通知并显示菜单项「有新版本 本地 xxx → 远端 xxx」（点击打开仓库页），同一远端 sha 只提示一次；查询失败静默重试、不产生角标 |
 | 2026-09-21 | `docs/接口文档.md`、`README.md` | 阶段 5 配套文档 | 接口文档补 `updateCheck` 字段与更新检查所用接口说明；README 补「更新检查」小节 |
 | 2026-09-21 | 验证记录（无代码改动） | 阶段 5 验收 | A：真实仓库跑一次 → 日志 `更新检查：已是最新（2732abd）`，无通知；B：把本地仓库换成临时假仓库（HEAD `be13897`）→ 日志出现 `通知[blue/update] 有新版本 本地 be13897，远端 2732abd`，`events.json` 一条；无凭据场景（修复前实测）只写 `更新检查跳过：没有可用的 GitHub 凭据`，不产生通知与角标 |
+| 2026-09-21 | `scripts/widget.ps1`（运行段由 `ShowDialog()` 改为 `Show()` + `Dispatcher.Run()`、`Closed` 处理器调用 `InvokeShutdown()`、`Set-TrayOnly` 增加可见性日志） | 用户反馈「点了只留托盘之后，悬浮窗和托盘图标一起消失」 | 根因：窗口用 `ShowDialog()` 显示，WPF 中把模态窗口 `Hide()` 会结束模态循环，脚本继续执行到收尾逻辑并退出进程（日志证据：`只留托盘: True` 紧跟 `exit`）。改为 `$window.Show()` + `[System.Windows.Threading.Dispatcher]::Run()`，隐藏/恢复完全由窗口控制，只有真正关闭窗口时由 `Closed` 处理器 `InvokeShutdown()` 结束消息循环并走收尾 |
+| 2026-09-21 | 验证记录（无代码改动） | 确认修复 | 测试台 `DEEPSEEK_WIDGET_TEST_TRAY=1` 依次触发 只留托盘 → 切回 → 关闭窗口：日志为 `只留托盘: True（悬浮窗可见=False）`（进程仍在）→ `只留托盘: False（悬浮窗可见=True）` → `window closed` → `exit`；真实挂件重启后命中区域探针正常（空白穿透、鲸鱼接收，点击后气泡区域改为接收） |
 
 ## 未纳入本次改动
 

@@ -822,7 +822,7 @@ function Set-TrayOnly {
     if ($trayOnlyItem) { $trayOnlyItem.IsChecked = $Enabled }
     if ($script:TrayItemTrayOnly) { $script:TrayItemTrayOnly.Checked = $Enabled }
     Save-WidgetState $script:Cfg
-    Write-Log ('只留托盘: ' + $Enabled)
+    Write-Log ('只留托盘: {0}（悬浮窗可见={1}）' -f $Enabled, $window.IsVisible)
 }
 
 function Initialize-TrayIcon {
@@ -2057,6 +2057,8 @@ $window.Add_Closed({
     Save-WidgetState $script:Cfg
     Remove-Item -LiteralPath $PidFile -Force -ErrorAction SilentlyContinue
     Write-Log 'window closed'
+    # 退出：让 Dispatcher.Run() 返回，脚本继续走收尾逻辑
+    [System.Windows.Threading.Dispatcher]::CurrentDispatcher.InvokeShutdown()
 })
 
 # ---------------------------------------------------------------- 运行
@@ -2120,7 +2122,11 @@ $window.Add_Loaded({
     }
 })
 
-$null = $window.ShowDialog()
+# 不能再用 ShowDialog()：WPF 里"隐藏模态窗口"会结束模态循环，脚本会接着往下走并退出进程
+# （表现为点了「只留托盘」后悬浮窗和托盘图标一起消失）。改成普通显示 + 跑 Dispatcher，
+# 隐藏/再显示都由窗口自己控制，只有真正关闭窗口时才由 Closed 处理器结束消息循环。
+$window.Show()
+[System.Windows.Threading.Dispatcher]::Run()
 
 foreach ($timer in @($script:RefreshTimer, $script:RefreshPump, $script:BubbleTimer, $script:GifTimer, $script:RollTimer)) {
     if ($timer) { try { $timer.Stop() } catch { } }
