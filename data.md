@@ -50,6 +50,9 @@
 | 2026-09-21 | `scripts/widget.ps1`（新增 `Reset-SoundPools`/`Start-SoundHealthCheck`，`Get-SoundPool`、`Play-SoundFile`、`MouseEnter` 处理器、菜单新增「重载音效」） | 用户反馈「挂件无法发出音效」。实测：挂件进程（19:28 启动）自身音频会话峰值全为 0，而同一时刻另一进程新建 `MediaPlayer` 播放正常；系统日志显示当天 20:14、20:24 两次从 S3 睡眠恢复而进程一直存活——WPF 的 `MediaPlayer` 在睡眠/切换音频设备后会变成"哑"实例：进程、音频会话都在，但不出声且 `Position` 不推进 | 三重自愈：①订阅 `SystemEvents.PowerModeChanged`(Resume) 与 `SessionSwitch`(SessionUnlock)，事件发生后把播放器池标记过期，下次光标移入挂件（`Get-SoundPool`）时整池重建；②每次播放后 400ms 检查 `Position`，仍为 0 则判定失效并重建（探针实测：正常播放 500ms 后 `Position=104.5ms`，`Close()` 之后 Play 仍为 `0.0ms`）；③右键菜单「音效集」下新增「重载音效」用于手动重建 |
 | 2026-09-21 | 验证记录（无代码改动） | 确认修复 | 测试台以 `DEEPSEEK_WIDGET_TEST_BREAKSOUND=1` 把全部播放器 `Close()` 模拟失效：首次点击日志出现「音效播放器已重建: 播放位置未推进（播放器已失效）」，第二次点击即「音效已开始 / 音效播放结束」；部署并重启真实挂件后，按进程隔离峰值表测到可闻区间 927→1440ms（513ms），两段音效正常播出 |
 | 2026-09-21 | `README.md` | 同步用户可见变化 | 右键菜单列表补上「重载音效」；「排障」小节补充音效无声时的处理方式（自动重建 / 菜单手动重载 / 重启挂件） |
+| 2026-09-21 | `scripts/balance.mjs`（账本、`peakInfo`/`nextPeakChange`、`computeRuntime`、`baseResult`、`commandBalance`/`commandToday`、`printHuman`、`HELP`） | 阶段 1：为"续航预估 + 峰谷切换提醒 + 阈值告警"准备数据与判断层 | `usage.json` 升到 v2：新增 `hourly` 小时分桶（`YYYY-MM-DDTHH`，保留 48 小时，v1 文件读取时自动补空表）；`--json` 新增 `peak`（`isPeak`/`nextChangeAt`/`nextChangeAtSec`/`nextIsPeak`，按 9/12/14/18 点边界试探出下一次切换）与 `runtime`（`basis`/`ratePerHour`/`sampleHours`/`estimatedHours`；最近 24 小时内分桶 ≥2 个用小时口径并按时间跨度求平均，否则退回今日均值，再不足则为 `null`）；人类可读输出增加峰谷与续航两行 |
+| 2026-09-21 | `docs/接口文档.md`、`README.md` | 阶段 1 配套接口文档 | 接口文档补 `peak.*`、`runtime.*` 字段表与口径说明、`version=2` 与 `hourly` 字段；README「能力」补续航预估与峰谷字段说明 |
+| 2026-09-21 | 验证记录（无代码改动） | 阶段 1 验收 | `work/stage1_test.ps1` 用临时 state dir 覆盖 3 个分桶 / 单桶+今日 / 无数据 / 跨天 四种情况：分别得到 `hourly 0.31/3.9h/96.6h`、`today 0.105/22.9h/285.8h`、`null`、`hourly 0.349/2.9h/86h`（30 小时前的 99 元未计入，验证中因此修掉了"按桶数平均"导致的跨天污染）；真实账本跑 `balance` 输出「峰谷：谷价时段，下一次切换 2026-09-22T09:00:00+08:00（转为高峰）｜续航预估：约 39 天（按今日均值）」 |
 
 ## 未纳入本次改动
 

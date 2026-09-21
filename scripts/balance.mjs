@@ -20,7 +20,8 @@ const BALANCE_TIMEOUT_MS = 20000
 const USAGE_TIMEOUT_MS = 15000
 const RETRY_DELAY_MS = 500
 const HISTORY_KEEP_DAYS = 30
-const LEDGER_VERSION = 1
+const HOURLY_KEEP_HOURS = 48
+const LEDGER_VERSION = 2
 
 /* ------------------------------------------------------------------ *
  * 定价表：DeepSeek CNY 每百万 token 单价 [空闲时段, 高峰时段]
@@ -67,6 +68,35 @@ function isPeakTime(timeSec) {
   return false
 }
 
+const PEAK_BOUNDARY_HOURS = [9, 12, 14, 18]
+
+/** 下一次峰谷切换：在 9/12/14/18 点这些边界上试探，状态发生变化的那一刻即为切换点 */
+function nextPeakChange(now = new Date()) {
+  const nowSec = Math.floor(now.getTime() / 1000)
+  const currentPeak = isPeakTime(nowSec)
+  for (let dayOffset = 0; dayOffset <= 8; dayOffset++) {
+    for (const hour of PEAK_BOUNDARY_HOURS) {
+      const candidate = new Date(now.getFullYear(), now.getMonth(), now.getDate() + dayOffset, hour, 0, 0, 0)
+      const sec = Math.floor(candidate.getTime() / 1000)
+      if (sec <= nowSec + 1) continue
+      const after = isPeakTime(sec)
+      if (after !== currentPeak) return { at: candidate, isPeak: after }
+    }
+  }
+  return null
+}
+
+function peakInfo(now = new Date()) {
+  const isPeak = isPeakTime(Math.floor(now.getTime() / 1000))
+  const change = nextPeakChange(now)
+  return {
+    isPeak,
+    nextChangeAt: change ? localIso(change.at) : null,
+    nextChangeAtSec: change ? Math.floor(change.at.getTime() / 1000) : null,
+    nextIsPeak: change ? change.isPeak : null,
+  }
+}
+
 /* ------------------------------ 小工具 ------------------------------ */
 
 const pad2 = (n) => String(n).padStart(2, '0')
@@ -84,6 +114,21 @@ function localStamp(date = new Date()) {
 
 function todayKey(date = new Date()) {
   return `${date.getFullYear()}-${pad2(date.getMonth() + 1)}-${pad2(date.getDate())}`
+}
+
+function hourKey(date = new Date()) {
+  return `${todayKey(date)}T${pad2(date.getHours())}`
+}
+
+function localIso(date) {
+  const tzMin = -date.getTimezoneOffset()
+  const sign = tzMin >= 0 ? '+' : '-'
+  const abs = Math.abs(tzMin)
+  return (
+    `${date.getFullYear()}-${pad2(date.getMonth() + 1)}-${pad2(date.getDate())}T` +
+    `${pad2(date.getHours())}:${pad2(date.getMinutes())}:${pad2(date.getSeconds())}` +
+    `${sign}${pad2(Math.floor(abs / 60))}:${pad2(abs % 60)}`
+  )
 }
 
 const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms))
@@ -194,7 +239,12 @@ function resolveStateDir(cliValue) {
 function readLedger(file) {
   try {
     const parsed = JSON.parse(fs.readFileSync(file, 'utf8'))
-    if (parsed && typeof parsed === 'object') return parsed
+    if (parsed && typeof parsed === 'object') {
+      // v1 -> v2：补齐 hourly 分桶，历史日数据保持原样
+      parsed.history = parsed.history && typeof parsed.history === 'object' ? parsed.history : {}
+      parsed.hourly = parsed.hourly && typeof parsed.hourly === 'object' ? parsed.hourly : {}
+      return parsed
+    }
   } catch (err) {
     /* 文件不存在或损坏：按空账本处理 */
   }
@@ -206,6 +256,7 @@ function readLedger(file) {
     todayUsage: 0,
     lastSeenAt: null,
     history: {},
+    hourly: {},
   }
 }
 
@@ -247,7 +298,13 @@ function recordLedgerUsage(ledger, currentBalance, currency, now = new Date()) {
   } else {
     const prev = typeof ledger.lastBalance === 'number' ? ledger.lastBalance : currentBalance
     if (typeof prev === 'number' && typeof currentBalance === 'number' && currentBalance < prev) {
-      ledger.todayUsage = (typeof ledger.todayUsage === 'number' ? ledger.todayUsage : 0) + (prev - currentBalance)
+      const delta = prev - currentBalance
+      ledger.todayUsage = (typeof ledger.todayUsage === 'number' ? ledger.todayUsage : 0) + delta
+      // 小时分桶：本次观测到的消耗记到当前小时，供续航预估使用
+      ledger.hourly = ledger.hourly && typeof ledger.hourly === 'object' ? ledger.hourly : {}
+      const key = hourKey(now)
+      const bucket = Number(ledger.hourly[key])
+      ledger.hourly[key] = (Number.isFinite(bucket) ? bucket : 0) + delta
     }
     ledger.lastBalance = currentBalance
     ledger.lastCurrency = cur
@@ -259,6 +316,11 @@ function recordLedgerUsage(ledger, currentBalance, currency, now = new Date()) {
   const keys = Object.keys(ledger.history || {}).sort()
   while (keys.length > HISTORY_KEEP_DAYS) {
     delete ledger.history[keys.shift()]
+  }
+  ledger.hourly = ledger.hourly && typeof ledger.hourly === 'object' ? ledger.hourly : {}
+  const hourKeys = Object.keys(ledger.hourly).sort()
+  while (hourKeys.length > HOURLY_KEEP_HOURS) {
+    delete ledger.hourly[hourKeys.shift()]
   }
   return ledger
 }
@@ -406,6 +468,59 @@ function todayUsageFromLedger(ledger, now = new Date()) {
   return 0
 }
 
+/**
+ * 续航预估：优先用最近的小时分桶算平均速率（样本 ≥2 小时），
+ * 样本不足时退回「今日已用 ÷ 今日已过小时」。
+ * ratePerHour 为 null 表示暂时无法估算。
+ */
+function computeRuntime(ledger, balance, now = new Date()) {
+  const hourly = ledger && ledger.hourly && typeof ledger.hourly === 'object' ? ledger.hourly : {}
+  const currentHour = hourKey(now)
+  const cutoffHour = hourKey(new Date(now.getTime() - 24 * 3600 * 1000))
+  const recent = Object.keys(hourly)
+    .filter((key) => key < currentHour && key >= cutoffHour)
+    .sort()
+
+  let basis = null
+  let ratePerHour = null
+  let sampleHours = 0
+
+  if (recent.length >= 2) {
+    let sum = 0
+    for (const key of recent) {
+      const value = Number(hourly[key])
+      if (Number.isFinite(value) && value > 0) sum += value
+    }
+    // 按时间跨度平均：没有落键的小时按"零消耗"计，避免只在有消耗的小时上求平均而高估速率
+    const parts = recent[0].split(/[-T]/).map(Number)
+    const firstAt = new Date(parts[0], parts[1] - 1, parts[2], parts[3], 0, 0, 0)
+    const spanHours = Math.min(24, Math.max(2, (now.getTime() - firstAt.getTime()) / 3600000))
+    ratePerHour = sum / spanHours
+    sampleHours = Math.round(spanHours * 10) / 10
+    basis = 'hourly'
+  } else {
+    const hoursToday = now.getHours() + now.getMinutes() / 60 + now.getSeconds() / 3600
+    const todayUsage = todayUsageFromLedger(ledger, now)
+    if (hoursToday >= 0.5 && Number.isFinite(todayUsage) && todayUsage > 0) {
+      ratePerHour = todayUsage / hoursToday
+      sampleHours = Math.round(hoursToday * 10) / 10
+      basis = 'today'
+    }
+  }
+
+  const total = Number(balance)
+  let estimatedHours = null
+  if (basis && Number.isFinite(total) && total > 0 && ratePerHour > 0) {
+    estimatedHours = Math.round((total / ratePerHour) * 10) / 10
+  }
+  return {
+    basis,
+    ratePerHour: Number.isFinite(ratePerHour) ? Math.round(ratePerHour * 10000) / 10000 : null,
+    sampleHours,
+    estimatedHours,
+  }
+}
+
 async function computeTodayUsage({ mode, ledger, ledgerFilePath, ledgerWritable, warnings }) {
   const effectiveMode = mode === 'token' ? 'token' : 'ledger'
   if (effectiveMode === 'ledger') {
@@ -462,6 +577,7 @@ function baseResult(stateFile) {
     updatedAt: now.toISOString(),
     updatedAtLocal: localStamp(now),
     isPeak: isPeakTime(Math.floor(now.getTime() / 1000)),
+    peak: peakInfo(now),
     stateFile,
     warnings: [],
   }
@@ -510,6 +626,7 @@ async function commandBalance(options) {
     ledgerWritable: written.ok,
     warnings,
   })
+  result.runtime = computeRuntime(ledger, fetched.balance.totalBalance)
   return result
 }
 
@@ -525,10 +642,27 @@ async function commandToday(options) {
     warnings,
   })
   result.todayUsage.observation = ledger.lastSeenAt || null
+  result.runtime = computeRuntime(
+    ledger,
+    ledger && Number.isFinite(Number(ledger.lastBalance)) ? Number(ledger.lastBalance) : null,
+  )
   return result
 }
 
 /* --------------------------- 输出与入口 --------------------------- */
+
+function formatRuntime(runtime) {
+  if (!runtime || !runtime.ratePerHour) return '样本不足，暂不估算'
+  const label = runtime.basis === 'hourly' ? `最近 ${runtime.sampleHours} 小时` : '今日均值'
+  const hours = runtime.estimatedHours
+  let remain = '未知'
+  if (Number.isFinite(hours)) {
+    if (hours >= 24 * 365) remain = '一年以上'
+    else if (hours >= 48) remain = `约 ${Math.floor(hours / 24)} 天`
+    else remain = `约 ${Math.max(1, Math.round(hours))} 小时`
+  }
+  return `${remain}（按${label} ¥${money(runtime.ratePerHour)}/小时）`
+}
 
 function printHuman(result, command) {
   const warnings = result.warnings || []
@@ -548,6 +682,13 @@ function printHuman(result, command) {
         (usage.fallback ? '，已回落' : '') +
         `｜截至 ${result.updatedAtLocal}）`,
     )
+    if (result.peak) {
+      const next = result.peak.nextChangeAt
+        ? `，下一次切换 ${result.peak.nextChangeAt}（转为${result.peak.nextIsPeak ? '高峰' : '谷价'}）`
+        : ''
+      console.log(`峰谷：${result.peak.isPeak ? '高峰时段' : '谷价时段'}${next}`)
+    }
+    if (result.runtime) console.log(`续航预估：${formatRuntime(result.runtime)}`)
     if (result.balanceInfos && result.balanceInfos.length > 1) {
       const detail = result.balanceInfos
         .map((info) => `${info.currency} 总额 ${money(info.totalBalance)}/充值 ${money(info.toppedUpBalance)}/赠送 ${money(info.grantedBalance)}`)
@@ -612,7 +753,15 @@ const HELP = `deepseek-balance —— 查询 DeepSeek 余额与今日消耗
   DEEPSEEK_BALANCE_MODE        默认用量模式
   DEEPSEEK_BALANCE_STATE_DIR   账本目录
   CODEX_HOME                   读取 config.toml 的目录，默认 ~/.codex
-`
+
+JSON 输出（--json）：
+  在余额/今日已用之外，另含：
+    peak.isPeak / peak.nextChangeAt / peak.nextChangeAtSec / peak.nextIsPeak
+        当前是否高峰，以及下一次峰谷切换的本地时间与切换后的状态
+    runtime.basis / runtime.ratePerHour / runtime.sampleHours / runtime.estimatedHours
+        续航预估：basis 为 hourly（最近小时分桶，样本 ≥2 小时）或 today（今日均值），
+        ratePerHour 为 null 表示样本不足暂时无法估算
+ `
 
 async function main() {
   const options = parseArgs(process.argv.slice(2))

@@ -11,6 +11,7 @@ Codex 插件：在本机 Codex 里查询 DeepSeek 账户余额与今日消耗金
   - `ledger`（默认，免令牌）：脚本每次观测余额后用余额下降的差值累计当天用量，跨天归零并归档最近 30 天；币种切换只重置基准、不记差值
   - `token`（可选）：配置 `DEEPSEEK_PLATFORM_TOKEN` 后调用平台用量接口，按内置峰谷定价表实时换算当天金额
 - **零配置凭据**：优先 `DEEPSEEK_API_KEY`，缺省时回落到 `~/.codex/config.toml` 里 `base_url` 指向 `api.deepseek.com` 的 provider token
+- **续航预估与峰谷切换**：账本按小时分桶（保留最近 48 小时），`--json` 额外返回 `runtime`（每小时消耗速率、按当前余额估算的可用时长）与 `peak`（当前是否高峰、下一次切换时刻），供挂件做"还能用多久"和"峰谷提醒"
 
 ## 目录结构
 
