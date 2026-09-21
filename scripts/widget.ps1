@@ -83,7 +83,9 @@ function Get-DefaultState {
         bubbleOn  = $true
         trayNotify = $true
         balanceAlert = 5
-        dailyBudget  = 0
+        balanceAlertOn = $true
+        dailyBudget  = 5
+        dailyBudgetOn = $false
         peakNotice   = $true
         updateCheck  = $true
     }
@@ -347,6 +349,7 @@ $script:StatusHint = ''
 $script:UpdateInfo = $null
 $script:LastUpdateNoticeSha = $null
 $script:UpdateTimer = $null
+$script:BadgeView = 'reason'
 
 $xaml = @'
 <Window xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
@@ -357,6 +360,8 @@ $xaml = @'
         UseLayoutRounding="True" FontFamily="Microsoft YaHei UI, Segoe UI">
   <Window.ContextMenu>
     <ContextMenu x:Name="WidgetMenu" FontFamily="Microsoft YaHei UI, Segoe UI" FontSize="12">
+      <MenuItem x:Name="RefreshItem" Header="立即刷新"/>
+      <Separator/>
       <MenuItem>
         <MenuItem.Header>
           <Slider x:Name="ScaleSlider" Width="170" Minimum="0.6" Maximum="2.5" Value="1.5"
@@ -387,32 +392,22 @@ $xaml = @'
         <MenuItem x:Name="PeakQiangqiang" Header="!?强强?!" IsCheckable="True"/>
       </MenuItem>
       <MenuItem Header="告警">
-        <MenuItem x:Name="AlertBalanceOff" Header="余额告警：关" IsCheckable="True"/>
-        <MenuItem x:Name="AlertBalance3" Header="余额告警：¥3" IsCheckable="True"/>
-        <MenuItem x:Name="AlertBalance5" Header="余额告警：¥5" IsCheckable="True" IsChecked="True"/>
-        <MenuItem x:Name="AlertBalance10" Header="余额告警：¥10" IsCheckable="True"/>
-        <MenuItem x:Name="AlertBalance20" Header="余额告警：¥20" IsCheckable="True"/>
+        <MenuItem x:Name="BalanceAlertItem" Header="余额告警" IsCheckable="True" IsChecked="True"/>
+        <MenuItem x:Name="BalanceAlertValue" Header="余额告警阈值…"/>
         <Separator/>
-        <MenuItem x:Name="AlertBalanceCustom" Header="自定义…"/>
-        <Separator/>
-        <MenuItem x:Name="BudgetOff" Header="今日预算：关" IsCheckable="True" IsChecked="True"/>
-        <MenuItem x:Name="Budget1" Header="今日预算：¥1" IsCheckable="True"/>
-        <MenuItem x:Name="Budget3" Header="今日预算：¥3" IsCheckable="True"/>
-        <MenuItem x:Name="Budget5" Header="今日预算：¥5" IsCheckable="True"/>
-        <MenuItem x:Name="Budget10" Header="今日预算：¥10" IsCheckable="True"/>
-        <MenuItem x:Name="BudgetCustom" Header="自定义…"/>
+        <MenuItem x:Name="BudgetAlertItem" Header="今日预算" IsCheckable="True"/>
+        <MenuItem x:Name="BudgetValue" Header="今日预算阈值…"/>
         <Separator/>
         <MenuItem x:Name="PeakNoticeItem" Header="峰谷切换提醒" IsCheckable="True" IsChecked="True"/>
       </MenuItem>
       <MenuItem x:Name="RecentEventsItem" Header="最近事件"/>
       <MenuItem x:Name="UpdateItem" Header="有新版本" Visibility="Collapsed"/>
+      <Separator/>
       <MenuItem x:Name="UpdateCheckItem" Header="自动检查更新" IsCheckable="True" IsChecked="True"/>
-      <Separator/>
-      <MenuItem x:Name="BubbleItem" Header="气泡" IsCheckable="True" IsChecked="True"/>
-      <MenuItem x:Name="CloseWindowItem" Header="关闭悬浮窗"/>
       <MenuItem x:Name="AutostartItem" Header="开机自启" IsCheckable="True"/>
+      <MenuItem x:Name="BubbleItem" Header="气泡" IsCheckable="True" IsChecked="True"/>
       <Separator/>
-      <MenuItem x:Name="RefreshItem" Header="立即刷新"/>
+      <MenuItem x:Name="CloseWindowItem" Header="关闭悬浮窗"/>
     </ContextMenu>
   </Window.ContextMenu>
   <!-- RootGrid 全透明：分层窗口里 alpha=0 的像素不参与命中测试，点击会穿透到下层窗口。
@@ -477,7 +472,11 @@ $window = [Windows.Markup.XamlReader]::Parse($xaml)
 # 保证单个交互出错时挂件继续运行。
 [System.Windows.Threading.Dispatcher]::CurrentDispatcher.Add_UnhandledException({
     param($sender, $eventArgs)
-    Write-Log ('未处理异常: ' + $eventArgs.Exception.Message)
+    $trace = ''
+    try {
+        if ($eventArgs.Exception.StackTrace) { $trace = ' @ ' + (@($eventArgs.Exception.StackTrace -split "`r?`n") | Where-Object { $_.Trim() } | Select-Object -First 1).Trim() }
+    } catch { }
+    Write-Log ('未处理异常: ' + $eventArgs.Exception.Message + $trace)
     $eventArgs.Handled = $true
 })
 
@@ -513,18 +512,10 @@ $modeToken = $window.FindName('ModeToken')
 $peakDefault = $window.FindName('PeakDefault')
 $peakLiangwen = $window.FindName('PeakLiangwen')
 $peakQiangqiang = $window.FindName('PeakQiangqiang')
-$alertBalanceOff = $window.FindName('AlertBalanceOff')
-$alertBalance3 = $window.FindName('AlertBalance3')
-$alertBalance5 = $window.FindName('AlertBalance5')
-$alertBalance10 = $window.FindName('AlertBalance10')
-$alertBalance20 = $window.FindName('AlertBalance20')
-$alertBalanceCustom = $window.FindName('AlertBalanceCustom')
-$budgetOff = $window.FindName('BudgetOff')
-$budget1 = $window.FindName('Budget1')
-$budget3 = $window.FindName('Budget3')
-$budget5 = $window.FindName('Budget5')
-$budget10 = $window.FindName('Budget10')
-$budgetCustom = $window.FindName('BudgetCustom')
+$balanceAlertItem = $window.FindName('BalanceAlertItem')
+$balanceAlertValue = $window.FindName('BalanceAlertValue')
+$budgetAlertItem = $window.FindName('BudgetAlertItem')
+$budgetValue = $window.FindName('BudgetValue')
 $peakNoticeItem = $window.FindName('PeakNoticeItem')
 $recentEventsItem = $window.FindName('RecentEventsItem')
 $updateItem = $window.FindName('UpdateItem')
@@ -741,6 +732,7 @@ function Set-NoticeReason {
     # 置位/清除单个来源，并刷新角标；TtlSeconds > 0 时到点自动清除
     param([string]$Reason, [bool]$On, [int]$TtlSeconds = 0)
     if (-not $script:NoticeReasons.ContainsKey($Reason)) { return }
+    if ($On -and -not $script:NoticeReasons[$Reason]) { $script:BadgeView = 'reason' }
     $script:NoticeReasons[$Reason] = $On
     Update-NoticeBadge
     if ($script:NoticeClearTimers[$Reason]) {
@@ -847,28 +839,19 @@ function Initialize-TrayIcon {
         }
         $icon.Text = 'DeepSeek 余额挂件'
         $menu = New-Object System.Windows.Forms.ContextMenuStrip
-        $script:TrayItemRefresh = $menu.Items.Add('立即刷新')
-        $script:TrayItemAutostart = $menu.Items.Add('开机自启')
-        $script:TrayItemAutostart.CheckOnClick = $true
-        $script:TrayItemAutostart.Checked = Test-Path -LiteralPath $ShortcutPath
-        $script:TrayItemShowWindow = $menu.Items.Add('显示悬浮窗')
+        # 托盘菜单只保留两件事：悬浮窗显示/关闭（按状态切换文案）+ 退出
+        $script:TrayItemToggleWindow = $menu.Items.Add('关闭悬浮窗')
         $script:TrayItemExit = $menu.Items.Add('退出')
 
-        $script:TrayItemRefresh.Add_Click({
-            $script:RefreshIsManual = $true
-            Start-BalanceRefresh
+        $script:TrayItemToggleWindow.Add_Click({
+            if ($window.IsVisible) { Hide-FloatingWindow } else { Show-FloatingWindow }
         })
-        $script:TrayItemAutostart.Add_Click({
-            try {
-                if ($script:TrayItemAutostart.Checked) { Enable-Autostart } else { $null = Disable-Autostart }
-            } catch {
-                Write-Log ('自启设置失败: ' + $_.Exception.Message)
-            }
-            $script:TrayItemAutostart.Checked = Test-Path -LiteralPath $ShortcutPath
-            Sync-Menu
-        })
-        $script:TrayItemShowWindow.Add_Click({ Show-FloatingWindow })
         $script:TrayItemExit.Add_Click({ $window.Close() })
+        # 每次弹出菜单前刷新切换项文案
+        $menu.Add_Opening({
+            if (-not $script:TrayItemToggleWindow) { return }
+            $script:TrayItemToggleWindow.Text = if ($window.IsVisible) { '关闭悬浮窗' } else { '显示悬浮窗' }
+        })
         # 托盘左键单击 = 显示并前置悬浮窗（右键仍由 ContextMenuStrip 处理）
         $icon.add_MouseClick({
             param($sender, $eventArgs)
@@ -967,10 +950,13 @@ function Apply-CustomThreshold {
     switch ($Kind) {
         'balance' {
             $script:Cfg.balanceAlert = $value
+            # 填了正数就顺便把开关打开；填 0 视为关闭
+            $script:Cfg.balanceAlertOn = ($value -gt 0)
             $script:LastBalanceAlertAt = $null
         }
         'budget' {
             $script:Cfg.dailyBudget = $value
+            $script:Cfg.dailyBudgetOn = ($value -gt 0)
             $script:LastBudgetAlertDate = $null
         }
         default { return @{ ok = $false; message = '未知的告警类型' } }
@@ -1022,10 +1008,72 @@ function Show-ThresholdDialog {
     [void]$dialog.ShowDialog()
 }
 
+function Get-NoticeAdvice {
+    # 当前角标对应的"原因 + 推荐解决办法"（取优先级最高的一个来源）
+    if ($script:NoticeReasons['fetch']) {
+        $hint = if ($script:StatusHint) { $script:StatusHint } else { '取数失败' }
+        return @{ reason = [string]$hint; solution = '检查网络或密钥；恢复后角标自动消失' }
+    }
+    if ($script:NoticeReasons['balance']) {
+        $balance = if ($null -ne $script:ShownBalance) { [double]$script:ShownBalance } else { 0.0 }
+        return @{
+            reason   = ('余额 ¥{0:N2} ≤ ¥{1:N2}' -f $balance, [double]$script:Cfg.balanceAlert)
+            solution = '充值，或在「告警」里调低阈值 / 关掉余额告警'
+        }
+    }
+    if ($script:NoticeReasons['budget']) {
+        $today = if ($null -ne $script:TodayUsage) { [double]$script:TodayUsage } else { 0.0 }
+        return @{
+            reason   = ('今日 ¥{0:N2} ≥ 预算 ¥{1:N2}' -f $today, [double]$script:Cfg.dailyBudget)
+            solution = '调高今日预算阈值，或在「告警」里关掉它'
+        }
+    }
+    if ($script:NoticeReasons['sound']) {
+        return @{ reason = '音效播放器已重建'; solution = '不用处理；仍无声可点「音效集 → 重载音效」' }
+    }
+    if ($script:NoticeReasons['update']) {
+        $local = if ($script:UpdateInfo) { $script:UpdateInfo.local } else { '?' }
+        $remote = if ($script:UpdateInfo) { $script:UpdateInfo.remote } else { '?' }
+        return @{
+            reason   = ('有新版本 {0} → {1}' -f $local, $remote)
+            solution = '右键菜单点「有新版本」打开仓库查看'
+        }
+    }
+    if ($script:NoticeReasons['peak']) {
+        return @{ reason = '峰谷切换提示'; solution = '谷价时段适合跑量；可关掉「峰谷切换提醒」' }
+    }
+    return @{ reason = '没有待处理的事件'; solution = '一切正常，无需处理' }
+}
+
+function Show-NoticeAdviceBubble {
+    # 点角标：第一次显示事件原因，再点一次显示推荐解决办法，来回切换
+    $advice = Get-NoticeAdvice
+    if ($script:BadgeView -eq 'reason') {
+        $script:BadgeView = 'solution'
+        $title = '事件原因'
+        $body = [string]$advice.reason
+        $hint = '再点一下看推荐解决办法'
+    } else {
+        $script:BadgeView = 'reason'
+        $title = '推荐解决办法'
+        $body = [string]$advice.solution
+        $hint = '再点一下回到事件原因'
+    }
+    $script:RandomActive = $false
+    $script:RandomLines = $null
+    Write-Log ('角标建议: ' + $title + ' / ' + $body)
+    Show-Bubble -Lines @(
+        @{ t = $title; s = 'A'; c = ''; w = $false },
+        @{ t = $body; s = 'C'; c = ''; w = $true },
+        @{ t = $hint; s = 'C'; c = ''; w = $false }
+    )
+}
+
 function Test-Alerts {
     $balance = $script:ShownBalance
     $alert = [double]$script:Cfg.balanceAlert
-    if ($alert -gt 0 -and $null -ne $balance -and [double]$balance -le $alert) {
+    $alertOn = [bool]$script:Cfg.balanceAlertOn
+    if ($alertOn -and $alert -gt 0 -and $null -ne $balance -and [double]$balance -le $alert) {
         Set-NoticeReason -Reason 'balance' -On $true
         $now = Get-Date
         if (-not $script:LastBalanceAlertAt -or (($now - $script:LastBalanceAlertAt).TotalHours -ge 6)) {
@@ -1043,7 +1091,8 @@ function Test-Alerts {
     }
 
     $budget = [double]$script:Cfg.dailyBudget
-    if ($budget -gt 0 -and $null -ne $script:TodayUsage -and [double]$script:TodayUsage -ge $budget) {
+    $budgetOn = [bool]$script:Cfg.dailyBudgetOn
+    if ($budgetOn -and $budget -gt 0 -and $null -ne $script:TodayUsage -and [double]$script:TodayUsage -ge $budget) {
         Set-NoticeReason -Reason 'budget' -On $true
         $today = Get-Date -Format 'yyyy-MM-dd'
         if ($script:LastBudgetAlertDate -ne $today) {
@@ -1203,20 +1252,10 @@ function Sync-Menu {
     $peakDefault.IsChecked = ($script:Cfg.peakMode -eq 'default')
     $peakLiangwen.IsChecked = ($script:Cfg.peakMode -eq 'liangwen')
     $peakQiangqiang.IsChecked = ($script:Cfg.peakMode -eq 'qiangqiang')
-    $balanceAlert = [int]$script:Cfg.balanceAlert
-    $alertBalanceOff.IsChecked = ($balanceAlert -le 0)
-    $alertBalance3.IsChecked = ($balanceAlert -eq 3)
-    $alertBalance5.IsChecked = ($balanceAlert -eq 5)
-    $alertBalance10.IsChecked = ($balanceAlert -eq 10)
-    $alertBalance20.IsChecked = ($balanceAlert -eq 20)
-    $dailyBudget = [int]$script:Cfg.dailyBudget
-    $budgetOff.IsChecked = ($dailyBudget -le 0)
-    $budget1.IsChecked = ($dailyBudget -eq 1)
-    $budget3.IsChecked = ($dailyBudget -eq 3)
-    $budget5.IsChecked = ($dailyBudget -eq 5)
-    $budget10.IsChecked = ($dailyBudget -eq 10)
-    $alertBalanceCustom.Header = ('自定义…（当前 {0}）' -f (Format-ThresholdText $balanceAlert))
-    $budgetCustom.Header = ('自定义…（当前 {0}）' -f (Format-ThresholdText $dailyBudget))
+    $balanceAlertItem.IsChecked = [bool]$script:Cfg.balanceAlertOn
+    $budgetAlertItem.IsChecked = [bool]$script:Cfg.dailyBudgetOn
+    $balanceAlertValue.Header = ('余额告警阈值…（当前 {0}）' -f (Format-ThresholdText ([double]$script:Cfg.balanceAlert)))
+    $budgetValue.Header = ('今日预算阈值…（当前 {0}）' -f (Format-ThresholdText ([double]$script:Cfg.dailyBudget)))
     $peakNoticeItem.IsChecked = [bool]$script:Cfg.peakNotice
     $updateCheckItem.IsChecked = [bool]$script:Cfg.updateCheck
     $bubbleItem.IsChecked = [bool]$script:Cfg.bubbleOn
@@ -1661,13 +1700,9 @@ function Animate-Amount {
 
 function Render-Balance {
     if ($script:RandomActive -and $script:RandomLines) { return }
-    if ($script:Status -eq 'error') {
-        $line3.Text = Get-HintText
-        return
-    }
-    if ($null -ne $script:TodayUsage) {
-        $line3.Text = '今日已用 ' + (Format-Money $script:TodayUsage $script:ShownCurrency)
-    }
+    # 统一走 Get-HintText：它带续航预估后缀（"今日已用 ¥x · 可用约 N 天"）。
+    # 之前这里直接拼 "今日已用 ..."，每次刷新都会把刚显示的预测覆盖掉，表现为"闪一下就变回去"。
+    $line3.Text = Get-HintText
 }
 
 # 诊断用：把窗口内容渲染成 PNG（仅在 DEEPSEEK_WIDGET_SNAPSHOT=1 时启用），
@@ -1945,12 +1980,27 @@ $window.Add_MouseLeftButtonDown({
             $insideBubble = $false
         }
     }
+    # 角标命中：点它看事件原因，再点一次看推荐解决办法
+    $insideBadge = $false
+    if ($noticeBadge -and $noticeBadge.Visibility -eq 'Visible') {
+        try {
+            $badgeBounds = $noticeBadge.TransformToAncestor($window).TransformBounds(
+                (New-Object System.Windows.Rect(0, 0, [double]$noticeBadge.ActualWidth, [double]$noticeBadge.ActualHeight)))
+            $insideBadge = $badgeBounds.Contains($point)
+        } catch {
+            $insideBadge = $false
+        }
+    }
     Play-Sound 'press'
     Start-PressAnimation
     $startLeft = [double]$window.Left
     $startTop = [double]$window.Top
     try { $window.DragMove() } catch { }
     $moved = ([Math]::Abs([double]$window.Left - $startLeft) -gt 3) -or ([Math]::Abs([double]$window.Top - $startTop) -gt 3)
+    if ($env:DEEPSEEK_WIDGET_DEBUG_INPUT -eq '1') {
+        Write-Log ('点击: 位置={0:N0},{1:N0} 角标内={2} 气泡内={3} 移动={4} 角标可见={5}' -f `
+            $point.X, $point.Y, $insideBadge, $insideBubble, $moved, $noticeBadge.Visibility)
+    }
     if ($moved) {
         $script:Cfg.left = [double]$window.Left
         $script:Cfg.top = [double]$window.Top
@@ -1964,6 +2014,10 @@ $window.Add_MouseLeftButtonDown({
     # 松手立即复原（回弹动画），不额外等待
     Start-ReleaseAnimation
     Play-Sound 'release'
+    if ($insideBadge) {
+        Show-NoticeAdviceBubble
+        return
+    }
     if ($insideBubble) {
         if ($script:RandomActive) {
             Hide-Bubble
@@ -2072,46 +2126,27 @@ $peakQiangqiang.Add_Click({
     Save-WidgetState $script:Cfg
 })
 
-foreach ($pair in @(
-        @{ Name = 'AlertBalanceOff'; Value = 0 },
-        @{ Name = 'AlertBalance3'; Value = 3 },
-        @{ Name = 'AlertBalance5'; Value = 5 },
-        @{ Name = 'AlertBalance10'; Value = 10 },
-        @{ Name = 'AlertBalance20'; Value = 20 })) {
-    $menuItem = $window.FindName($pair.Name)
-    $alertValue = $pair.Value
-    $menuItem.Add_Click({
-        $script:Cfg.balanceAlert = $alertValue
-        $script:LastBalanceAlertAt = $null
-        Sync-Menu
-        Save-WidgetState $script:Cfg
-        Test-Alerts
-    }.GetNewClosure())
-}
+$balanceAlertItem.Add_Click({
+    $script:Cfg.balanceAlertOn = [bool]$balanceAlertItem.IsChecked
+    $script:LastBalanceAlertAt = $null
+    Save-WidgetState $script:Cfg
+    Test-Alerts
+})
 
-foreach ($pair in @(
-        @{ Name = 'BudgetOff'; Value = 0 },
-        @{ Name = 'Budget1'; Value = 1 },
-        @{ Name = 'Budget3'; Value = 3 },
-        @{ Name = 'Budget5'; Value = 5 },
-        @{ Name = 'Budget10'; Value = 10 })) {
-    $menuItem = $window.FindName($pair.Name)
-    $budgetValue = $pair.Value
-    $menuItem.Add_Click({
-        $script:Cfg.dailyBudget = $budgetValue
-        Sync-Menu
-        Save-WidgetState $script:Cfg
-        Test-Alerts
-    }.GetNewClosure())
-}
+$budgetAlertItem.Add_Click({
+    $script:Cfg.dailyBudgetOn = [bool]$budgetAlertItem.IsChecked
+    $script:LastBudgetAlertDate = $null
+    Save-WidgetState $script:Cfg
+    Test-Alerts
+})
 
 $peakNoticeItem.Add_Click({
     $script:Cfg.peakNotice = [bool]$peakNoticeItem.IsChecked
     Save-WidgetState $script:Cfg
 })
 
-$alertBalanceCustom.Add_Click({ Show-ThresholdDialog -Kind 'balance' })
-$budgetCustom.Add_Click({ Show-ThresholdDialog -Kind 'budget' })
+$balanceAlertValue.Add_Click({ Show-ThresholdDialog -Kind 'balance' })
+$budgetValue.Add_Click({ Show-ThresholdDialog -Kind 'budget' })
 
 $updateCheckItem.Add_Click({
     $script:Cfg.updateCheck = [bool]$updateCheckItem.IsChecked
@@ -2225,7 +2260,11 @@ $window.Add_Loaded({
 # （表现为点了「只留托盘」后悬浮窗和托盘图标一起消失）。改成普通显示 + 跑 Dispatcher，
 # 隐藏/再显示都由窗口自己控制，只有真正关闭窗口时才由 Closed 处理器结束消息循环。
 $window.Show()
-[System.Windows.Threading.Dispatcher]::Run()
+try {
+    [System.Windows.Threading.Dispatcher]::Run()
+} catch {
+    Write-Log ('窗口消息循环异常结束: ' + $_.Exception.Message)
+}
 
 foreach ($timer in @($script:RefreshTimer, $script:RefreshPump, $script:BubbleTimer, $script:GifTimer, $script:RollTimer)) {
     if ($timer) { try { $timer.Stop() } catch { } }
