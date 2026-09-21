@@ -86,6 +86,7 @@ function Get-DefaultState {
         balanceAlert = 5
         dailyBudget  = 0
         peakNotice   = $true
+        updateCheck  = $true
     }
 }
 
@@ -344,6 +345,9 @@ $script:LastBalanceAlertAt = $null
 $script:LastBudgetAlertDate = $null
 $script:FetchFailed = $false
 $script:StatusHint = ''
+$script:UpdateInfo = $null
+$script:LastUpdateNoticeSha = $null
+$script:UpdateTimer = $null
 
 $xaml = @'
 <Window xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
@@ -399,6 +403,8 @@ $xaml = @'
         <MenuItem x:Name="PeakNoticeItem" Header="峰谷切换提醒" IsCheckable="True" IsChecked="True"/>
       </MenuItem>
       <MenuItem x:Name="RecentEventsItem" Header="最近事件"/>
+      <MenuItem x:Name="UpdateItem" Header="有新版本" Visibility="Collapsed"/>
+      <MenuItem x:Name="UpdateCheckItem" Header="自动检查更新" IsCheckable="True" IsChecked="True"/>
       <Separator/>
       <MenuItem x:Name="BubbleItem" Header="气泡" IsCheckable="True" IsChecked="True"/>
       <MenuItem x:Name="TrayOnlyItem" Header="只留托盘（隐藏悬浮窗）" IsCheckable="True"/>
@@ -518,6 +524,8 @@ $budget5 = $window.FindName('Budget5')
 $budget10 = $window.FindName('Budget10')
 $peakNoticeItem = $window.FindName('PeakNoticeItem')
 $recentEventsItem = $window.FindName('RecentEventsItem')
+$updateItem = $window.FindName('UpdateItem')
+$updateCheckItem = $window.FindName('UpdateCheckItem')
 $bubbleItem = $window.FindName('BubbleItem')
 $trayOnlyItem = $window.FindName('TrayOnlyItem')
 $autostartItem = $window.FindName('AutostartItem')
@@ -954,6 +962,99 @@ function Test-Alerts {
     }
 }
 
+# ---------------------------------------------------------------- 更新检查
+
+function Get-GitHubToken {
+    if ($env:GITHUB_TOKEN) { return [string]$env:GITHUB_TOKEN }
+    # 注意：Windows PowerShell 5.1 用管道给 git 喂 stdin 会被判为"缺 protocol 字段"，
+    # 换成写请求文件 + cmd 重定向（请求内容不含密钥，用完即删）。
+    $reqFile = Join-Path $env:TEMP 'deepseek-balance-cred-req.txt'
+    try {
+        [System.IO.File]::WriteAllText($reqFile, "protocol=https`r`nhost=github.com`r`n`r`n")
+        $out = & cmd.exe /c "git credential fill < `"$reqFile`"" 2>$null
+        foreach ($line in @($out)) {
+            if ($line -like 'password=*') { return $line.Substring(9) }
+        }
+    } catch { }
+    finally {
+        try { [System.IO.File]::Delete($reqFile) } catch { }
+    }
+    return $null
+}
+
+function Test-PluginUpdate {
+    # 比对本地插件仓库 HEAD 与 GitHub 远端 main；只提示，不下载、不覆盖文件
+    if (-not $script:Cfg.updateCheck) { return }
+    $repo = $env:DEEPSEEK_WIDGET_PLUGIN_REPO
+    if (-not $repo) { $repo = Join-Path $env:USERPROFILE 'plugins\deepseek-balance' }
+    if (-not (Test-Path -LiteralPath (Join-Path $repo '.git'))) {
+        Write-Log ('更新检查跳过：未找到本地仓库 ' + $repo)
+        return
+    }
+    $localSha = ''
+    try {
+        $localSha = [string]((& git -C $repo rev-parse HEAD 2>$null | Select-Object -First 1))
+        $localSha = $localSha.Trim()
+    } catch { }
+    if (-not $localSha) {
+        Write-Log '更新检查跳过：读不到本地 commit'
+        return
+    }
+    $token = Get-GitHubToken
+    if (-not $token) {
+        Write-Log '更新检查跳过：没有可用的 GitHub 凭据（可设置 GITHUB_TOKEN，或让 git 记住凭据）'
+        return
+    }
+    try {
+        $headers = @{
+            Authorization = "token $token"
+            'User-Agent'  = 'deepseek-balance-widget'
+            Accept        = 'application/vnd.github+json'
+        }
+        $remote = Invoke-RestMethod -Uri 'https://api.github.com/repos/lihenger/deepseek-balance/commits/main' -Headers $headers -TimeoutSec 20
+        $remoteSha = [string]$remote.sha
+    } catch {
+        Write-Log ('更新检查失败（不提示）: ' + $_.Exception.Message)
+        return
+    }
+    if (-not $remoteSha) {
+        Write-Log '更新检查失败（不提示）：远端未返回 commit'
+        return
+    }
+    if ($remoteSha -eq $localSha) {
+        Write-Log ('更新检查：已是最新（' + $localSha.Substring(0, 7) + '）')
+        return
+    }
+    $script:UpdateInfo = @{
+        url    = 'https://github.com/lihenger/deepseek-balance'
+        local  = $localSha.Substring(0, 7)
+        remote = $remoteSha.Substring(0, 7)
+    }
+    if ($updateItem) {
+        $updateItem.Header = ('有新版本 {0} → {1}' -f $script:UpdateInfo.local, $script:UpdateInfo.remote)
+        $updateItem.Visibility = 'Visible'
+    }
+    if ($script:LastUpdateNoticeSha -ne $remoteSha) {
+        $script:LastUpdateNoticeSha = $remoteSha
+        Show-Notice -Level 'blue' -Key 'update' -Title '有新版本' `
+            -Text ('本地 {0}，远端 {1}，右键菜单可打开仓库' -f $script:UpdateInfo.local, $script:UpdateInfo.remote)
+    }
+    Write-Log ('更新检查：发现新版本 本地 {0} / 远端 {1}' -f $script:UpdateInfo.local, $script:UpdateInfo.remote)
+}
+
+function Start-UpdateCheckTimer {
+    if (-not $script:Cfg.updateCheck) { return }
+    $script:UpdateTimer = New-Object System.Windows.Threading.DispatcherTimer
+    $script:UpdateTimer.Interval = [TimeSpan]::FromMinutes(2)
+    $script:UpdateTimer.Add_Tick({
+        $script:UpdateTimer.Stop()
+        $script:UpdateTimer.Interval = [TimeSpan]::FromHours(6)
+        $script:UpdateTimer.Start()
+        Test-PluginUpdate
+    })
+    $script:UpdateTimer.Start()
+}
+
 function Update-RecentEventsMenu {
     # 「最近事件」子菜单：右键打开时刷新，列出最近 5 条，点条目打开事件目录
     if (-not $recentEventsItem) { return }
@@ -1017,6 +1118,7 @@ function Sync-Menu {
     $budget5.IsChecked = ($dailyBudget -eq 5)
     $budget10.IsChecked = ($dailyBudget -eq 10)
     $peakNoticeItem.IsChecked = [bool]$script:Cfg.peakNotice
+    $updateCheckItem.IsChecked = [bool]$script:Cfg.updateCheck
     $bubbleItem.IsChecked = [bool]$script:Cfg.bubbleOn
     $trayOnlyItem.IsChecked = [bool]$script:Cfg.trayOnly
     $autostartItem.IsChecked = (Test-Path -LiteralPath $ShortcutPath)
@@ -1909,6 +2011,18 @@ $peakNoticeItem.Add_Click({
     Save-WidgetState $script:Cfg
 })
 
+$updateCheckItem.Add_Click({
+    $script:Cfg.updateCheck = [bool]$updateCheckItem.IsChecked
+    Save-WidgetState $script:Cfg
+    if ($script:Cfg.updateCheck) { Test-PluginUpdate }
+})
+
+$updateItem.Add_Click({
+    if ($script:UpdateInfo) {
+        try { Start-Process -FilePath $script:UpdateInfo.url } catch { }
+    }
+})
+
 $bubbleItem.Add_Click({
     $script:Cfg.bubbleOn = [bool]$bubbleItem.IsChecked
     if (-not $script:Cfg.bubbleOn) { Hide-Bubble }
@@ -1999,6 +2113,7 @@ $window.Add_Loaded({
     $script:PeakTick.Add_Tick({ Test-PeakNotice })
     $script:PeakTick.Start()
     Initialize-TrayIcon
+    Start-UpdateCheckTimer
     if ($script:Cfg.trayOnly) {
         Hide-FloatingWindow
         Write-Log '启动时按状态隐藏悬浮窗（只留托盘）'

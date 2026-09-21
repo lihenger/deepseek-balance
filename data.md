@@ -62,6 +62,9 @@
 | 2026-09-21 | `scripts/widget.ps1`（新增 `Report-FetchFailure`/`Update-RecentEventsMenu`、`Show-Notice -Silent`、`Reset-SoundPools`、`Get-HintText`、`Complete-BalanceRefresh`、菜单新增「最近事件」） | 阶段 4：自愈动作可见化 | 取数失败（含 `network`/`no_api_key`/`no_output`/`exception`）统一走 `Report-FetchFailure` → 红色通知 + 角标常亮，气泡第三行改为按错误码的可读提示（如"网络异常 · 点击重试"）；恢复成功时清除红角标并记一条 `fetch-recovered` 静默事件；音效播放器重建时发橙色通知（`sound-rebuild`）；右键菜单新增「最近事件」子菜单，右键打开时刷新、列出最近 5 条，点条目或「打开事件目录」用资源管理器打开状态目录 |
 | 2026-09-21 | `README.md` | 阶段 4 配套文档 | 「托盘与通知」小节补充 取数失败常亮/恢复自动清除、最近事件菜单、以及各角标颜色的含义 |
 | 2026-09-21 | 验证记录（无代码改动） | 阶段 4 验收 | 用"先失败后成功"的桩 `balance.mjs`（`work/wtest/balance_stub.mjs`，配合 `stub-fail-once` 标记）跑 26 秒：日志依次出现 `通知[red/fetch:network] 取数失败 stub 模拟网络异常` 与 `通知[blue/fetch-recovered] 取数已恢复 余额接口恢复正常`，`events.json` 两条齐全；再用 `DEEPSEEK_WIDGET_TEST_BREAKSOUND=1` 制造失效播放器并点击，日志出现 `音效播放器已重建: 播放位置未推进（播放器已失效）` 与 `通知[orange/sound-rebuild]`，事件文件同步写入 |
+| 2026-09-21 | `scripts/widget.ps1`（新增 `Get-GitHubToken`/`Test-PluginUpdate`/`Start-UpdateCheckTimer`，菜单新增「自动检查更新」与「有新版本」，状态新增 `updateCheck`） | 阶段 5：自动更新检查（只提示，不自动更新） | 启动 2 分钟后首查、之后每 6 小时一次；凭据顺序 `GITHUB_TOKEN` → `git credential fill`（本机已存凭据，改用"写请求文件 + cmd 重定向"写法，因为 Windows PowerShell 5.1 用管道喂 stdin 会被 git 判为缺 protocol 字段）→ 都没有则只写日志；比对本地插件仓库 HEAD 与 `api.github.com/repos/lihenger/deepseek-balance/commits/main`，不一致时发蓝色通知并显示菜单项「有新版本 本地 xxx → 远端 xxx」（点击打开仓库页），同一远端 sha 只提示一次；查询失败静默重试、不产生角标 |
+| 2026-09-21 | `docs/接口文档.md`、`README.md` | 阶段 5 配套文档 | 接口文档补 `updateCheck` 字段与更新检查所用接口说明；README 补「更新检查」小节 |
+| 2026-09-21 | 验证记录（无代码改动） | 阶段 5 验收 | A：真实仓库跑一次 → 日志 `更新检查：已是最新（2732abd）`，无通知；B：把本地仓库换成临时假仓库（HEAD `be13897`）→ 日志出现 `通知[blue/update] 有新版本 本地 be13897，远端 2732abd`，`events.json` 一条；无凭据场景（修复前实测）只写 `更新检查跳过：没有可用的 GitHub 凭据`，不产生通知与角标 |
 
 ## 未纳入本次改动
 
