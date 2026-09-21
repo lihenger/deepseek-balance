@@ -81,6 +81,8 @@ function Get-DefaultState {
         usageMode = 'ledger'
         peakMode  = 'default'
         bubbleOn  = $true
+        trayOnly  = $false
+        trayNotify = $true
     }
 }
 
@@ -371,6 +373,7 @@ $xaml = @'
       </MenuItem>
       <Separator/>
       <MenuItem x:Name="BubbleItem" Header="气泡" IsCheckable="True" IsChecked="True"/>
+      <MenuItem x:Name="TrayOnlyItem" Header="只留托盘（隐藏悬浮窗）" IsCheckable="True"/>
       <MenuItem x:Name="AutostartItem" Header="开机自启" IsCheckable="True"/>
       <Separator/>
       <MenuItem x:Name="RefreshItem" Header="立即刷新"/>
@@ -424,6 +427,10 @@ $xaml = @'
       </Viewbox>
       <Image x:Name="WhaleImage" HorizontalAlignment="Right" VerticalAlignment="Bottom"
              Width="285" Height="285" Stretch="Uniform"/>
+      <!-- 角标：取数失败/告警（红）、自愈事件（橙）、有新版本（蓝）；放在 Body 内随镜像一起翻转 -->
+      <Ellipse x:Name="NoticeBadge" Width="34" Height="34" Visibility="Collapsed"
+               HorizontalAlignment="Right" VerticalAlignment="Bottom"
+               Fill="#e0433f" Stroke="#FFFFFF" StrokeThickness="6"/>
     </Grid>
   </Grid>
 </Window>
@@ -457,6 +464,7 @@ $whaleImage = $window.FindName('WhaleImage')
 $textStack = $window.FindName('TextStack')
 $whaleHit = $window.FindName('WhaleHit')
 $bubbleHit = $window.FindName('BubbleHit')
+$noticeBadge = $window.FindName('NoticeBadge')
 
 $menu = $window.FindName('WidgetMenu')
 $scaleSlider = $window.FindName('ScaleSlider')
@@ -471,6 +479,7 @@ $peakDefault = $window.FindName('PeakDefault')
 $peakLiangwen = $window.FindName('PeakLiangwen')
 $peakQiangqiang = $window.FindName('PeakQiangqiang')
 $bubbleItem = $window.FindName('BubbleItem')
+$trayOnlyItem = $window.FindName('TrayOnlyItem')
 $autostartItem = $window.FindName('AutostartItem')
 $refreshItem = $window.FindName('RefreshItem')
 $exitItem = $window.FindName('ExitItem')
@@ -630,6 +639,170 @@ function Stop-SoundKeepAlive {
     Write-Log '音频唤醒保持：已停止'
 }
 
+# ---------------------------------------------------------------- 通知与角标
+
+# 统一通知入口：写事件文件（events.json，最多 50 条）+ 更新角标 + 弹一次托盘气泡。
+# 同一 Key 10 分钟内不重复弹托盘，但事件与角标照记。
+$EventsFile = Join-Path $StateDir 'events.json'
+$script:NoticeDedup = @{}
+$script:NoticeLevels = @{ red = $false; orange = $false; blue = $false }
+$script:TrayIcon = $null
+$script:TrayMenu = $null
+
+function Get-NoticeLevel {
+    if ($script:NoticeLevels['red']) { return 'red' }
+    if ($script:NoticeLevels['orange']) { return 'orange' }
+    if ($script:NoticeLevels['blue']) { return 'blue' }
+    return 'none'
+}
+
+function Update-NoticeBadge {
+    if (-not $noticeBadge) { return }
+    $level = Get-NoticeLevel
+    if ($level -eq 'none') {
+        $noticeBadge.Visibility = 'Collapsed'
+        return
+    }
+    $noticeBadge.Fill = switch ($level) {
+        'red' { '#e0433f' }
+        'orange' { '#f0a020' }
+        default { '#3f7fe0' }
+    }
+    $noticeBadge.Visibility = 'Visible'
+}
+
+function Clear-NoticeLevel {
+    param([string]$Level)
+    if (-not $Level) { return }
+    $script:NoticeLevels[$Level] = $false
+    Update-NoticeBadge
+}
+
+function Add-NoticeEvent {
+    param([string]$Level, [string]$Key, [string]$Title, [string]$Text)
+    try {
+        $list = @()
+        if (Test-Path -LiteralPath $EventsFile) {
+            $parsed = Get-Content -LiteralPath $EventsFile -Raw -Encoding UTF8 | ConvertFrom-Json
+            if ($parsed) { $list = @($parsed) }
+        }
+        $entry = [ordered]@{
+            at    = (Get-Date -Format 'yyyy-MM-dd HH:mm:ss')
+            level = $Level
+            key   = $Key
+            title = $Title
+            text  = $Text
+        }
+        $list = @($entry) + @($list)
+        if ($list.Count -gt 50) { $list = $list[0..49] }
+        ($list | ConvertTo-Json -Depth 4) | Set-Content -LiteralPath $EventsFile -Encoding UTF8
+    } catch {
+        Write-Log ('事件记录写入失败: ' + $_.Exception.Message)
+    }
+}
+
+function Show-Notice {
+    param(
+        [string]$Level = 'orange',
+        [string]$Key = 'general',
+        [string]$Title = 'DeepSeek 余额挂件',
+        [string]$Text = ''
+    )
+    Add-NoticeEvent -Level $Level -Key $Key -Title $Title -Text $Text
+    $script:NoticeLevels[$Level] = $true
+    Update-NoticeBadge
+    Write-Log ('通知[{0}/{1}] {2} {3}' -f $Level, $Key, $Title, $Text)
+    if (-not $script:Cfg.trayNotify) { return }
+    $now = Get-Date
+    $last = $script:NoticeDedup[$Key]
+    if ($last -and (($now - $last).TotalMinutes -lt 10)) {
+        Write-Log ('通知[{0}] 10 分钟内已弹过托盘，跳过气泡' -f $Key)
+        return
+    }
+    $script:NoticeDedup[$Key] = $now
+    try {
+        if ($script:TrayIcon) {
+            $script:TrayIcon.BalloonTipTitle = $Title
+            $script:TrayIcon.BalloonTipText = $Text
+            $script:TrayIcon.BalloonTipIcon = [System.Windows.Forms.ToolTipIcon]::Info
+            $script:TrayIcon.ShowBalloonTip(6000)
+        }
+    } catch {
+        Write-Log ('托盘通知失败: ' + $_.Exception.Message)
+    }
+}
+
+# ---------------------------------------------------------------- 托盘图标
+
+function Show-FloatingWindow {
+    try {
+        if (-not $window.IsVisible) { $window.Show() }
+        $window.Activate()
+    } catch { }
+}
+
+function Hide-FloatingWindow {
+    try { $window.Hide() } catch { }
+}
+
+function Set-TrayOnly {
+    param([bool]$Enabled)
+    $script:Cfg.trayOnly = $Enabled
+    if ($Enabled) { Hide-FloatingWindow } else { Show-FloatingWindow }
+    if ($trayOnlyItem) { $trayOnlyItem.IsChecked = $Enabled }
+    if ($script:TrayItemTrayOnly) { $script:TrayItemTrayOnly.Checked = $Enabled }
+    Save-WidgetState $script:Cfg
+    Write-Log ('只留托盘: ' + $Enabled)
+}
+
+function Initialize-TrayIcon {
+    try {
+        Add-Type -AssemblyName System.Windows.Forms, System.Drawing
+        $icon = New-Object System.Windows.Forms.NotifyIcon
+        if (Test-Path -LiteralPath $WhalePng) {
+            $bitmap = New-Object System.Drawing.Bitmap($WhalePng)
+            $handle = $bitmap.GetHicon()
+            $icon.Icon = [System.Drawing.Icon]::FromHandle($handle)
+            $bitmap.Dispose()
+        }
+        $icon.Text = 'DeepSeek 余额挂件'
+        $menu = New-Object System.Windows.Forms.ContextMenuStrip
+        $script:TrayItemRefresh = $menu.Items.Add('立即刷新')
+        $script:TrayItemAutostart = $menu.Items.Add('开机自启')
+        $script:TrayItemAutostart.CheckOnClick = $true
+        $script:TrayItemAutostart.Checked = Test-Path -LiteralPath $ShortcutPath
+        $script:TrayItemTrayOnly = $menu.Items.Add('只留托盘（隐藏悬浮窗）')
+        $script:TrayItemTrayOnly.CheckOnClick = $true
+        $script:TrayItemTrayOnly.Checked = [bool]$script:Cfg.trayOnly
+        $script:TrayItemExit = $menu.Items.Add('退出')
+
+        $script:TrayItemRefresh.Add_Click({
+            $script:RefreshIsManual = $true
+            Start-BalanceRefresh
+        })
+        $script:TrayItemAutostart.Add_Click({
+            try {
+                if ($script:TrayItemAutostart.Checked) { Enable-Autostart } else { $null = Disable-Autostart }
+            } catch {
+                Write-Log ('自启设置失败: ' + $_.Exception.Message)
+            }
+            $script:TrayItemAutostart.Checked = Test-Path -LiteralPath $ShortcutPath
+            Sync-Menu
+        })
+        $script:TrayItemTrayOnly.Add_Click({ Set-TrayOnly -Enabled ([bool]$script:TrayItemTrayOnly.Checked) })
+        $script:TrayItemExit.Add_Click({ $window.Close() })
+        $icon.add_MouseDoubleClick({ Show-FloatingWindow })
+
+        $icon.ContextMenuStrip = $menu
+        $icon.Visible = $true
+        $script:TrayIcon = $icon
+        $script:TrayMenu = $menu
+        Write-Log '托盘图标已创建'
+    } catch {
+        Write-Log ('托盘图标创建失败: ' + $_.Exception.Message)
+    }
+}
+
 # ---------------------------------------------------------------- 状态同步
 
 function Sync-Menu {
@@ -645,6 +818,7 @@ function Sync-Menu {
     $peakLiangwen.IsChecked = ($script:Cfg.peakMode -eq 'liangwen')
     $peakQiangqiang.IsChecked = ($script:Cfg.peakMode -eq 'qiangqiang')
     $bubbleItem.IsChecked = [bool]$script:Cfg.bubbleOn
+    $trayOnlyItem.IsChecked = [bool]$script:Cfg.trayOnly
     $autostartItem.IsChecked = (Test-Path -LiteralPath $ShortcutPath)
     $script:SyncingMenu = $false
 }
@@ -1206,6 +1380,12 @@ function Apply-Scale {
     $whaleHit.Height = $whaleSize
     $bubbleHit.Width = [double]$bubbleBox.Width
     $bubbleHit.Height = [double]$bubbleBox.Height
+    # 角标落在鲸鱼头部右上角（鲸鱼右下对齐、边长 0.5945*size）
+    $badgeSize = [Math]::Round($size * 0.11)
+    $noticeBadge.Width = $badgeSize
+    $noticeBadge.Height = $badgeSize
+    $noticeBadge.StrokeThickness = [Math]::Max(2, [Math]::Round($badgeSize * 0.18))
+    $noticeBadge.Margin = New-Object System.Windows.Thickness(0, 0, [Math]::Round($whaleSize * 0.06), [Math]::Round($whaleSize * 0.74))
 }
 
 function Set-Mirror {
@@ -1470,6 +1650,10 @@ $bubbleItem.Add_Click({
     Save-WidgetState $script:Cfg
 })
 
+$trayOnlyItem.Add_Click({
+    Set-TrayOnly -Enabled ([bool]$trayOnlyItem.IsChecked)
+})
+
 $autostartItem.Add_Click({
     try {
         if ($autostartItem.IsChecked) { Enable-Autostart } else { $null = Disable-Autostart }
@@ -1487,6 +1671,10 @@ $exitItem.Add_Click({ $window.Close() })
 
 $window.Add_Closed({
     Stop-SoundKeepAlive
+    if ($script:TrayIcon) {
+        try { $script:TrayIcon.Visible = $false; $script:TrayIcon.Dispose() } catch { }
+        $script:TrayIcon = $null
+    }
     Save-WidgetState $script:Cfg
     Remove-Item -LiteralPath $PidFile -Force -ErrorAction SilentlyContinue
     Write-Log 'window closed'
@@ -1540,6 +1728,11 @@ $window.Add_Loaded({
     Start-BalanceRefresh
     $script:RefreshTimer.Start()
     $script:RefreshPump.Start()
+    Initialize-TrayIcon
+    if ($script:Cfg.trayOnly) {
+        Hide-FloatingWindow
+        Write-Log '启动时按状态隐藏悬浮窗（只留托盘）'
+    }
 })
 
 $null = $window.ShowDialog()

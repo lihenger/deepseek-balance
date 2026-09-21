@@ -53,6 +53,9 @@
 | 2026-09-21 | `scripts/balance.mjs`（账本、`peakInfo`/`nextPeakChange`、`computeRuntime`、`baseResult`、`commandBalance`/`commandToday`、`printHuman`、`HELP`） | 阶段 1：为"续航预估 + 峰谷切换提醒 + 阈值告警"准备数据与判断层 | `usage.json` 升到 v2：新增 `hourly` 小时分桶（`YYYY-MM-DDTHH`，保留 48 小时，v1 文件读取时自动补空表）；`--json` 新增 `peak`（`isPeak`/`nextChangeAt`/`nextChangeAtSec`/`nextIsPeak`，按 9/12/14/18 点边界试探出下一次切换）与 `runtime`（`basis`/`ratePerHour`/`sampleHours`/`estimatedHours`；最近 24 小时内分桶 ≥2 个用小时口径并按时间跨度求平均，否则退回今日均值，再不足则为 `null`）；人类可读输出增加峰谷与续航两行 |
 | 2026-09-21 | `docs/接口文档.md`、`README.md` | 阶段 1 配套接口文档 | 接口文档补 `peak.*`、`runtime.*` 字段表与口径说明、`version=2` 与 `hourly` 字段；README「能力」补续航预估与峰谷字段说明 |
 | 2026-09-21 | 验证记录（无代码改动） | 阶段 1 验收 | `work/stage1_test.ps1` 用临时 state dir 覆盖 3 个分桶 / 单桶+今日 / 无数据 / 跨天 四种情况：分别得到 `hourly 0.31/3.9h/96.6h`、`today 0.105/22.9h/285.8h`、`null`、`hourly 0.349/2.9h/86h`（30 小时前的 99 元未计入，验证中因此修掉了"按桶数平均"导致的跨天污染）；真实账本跑 `balance` 输出「峰谷：谷价时段，下一次切换 2026-09-22T09:00:00+08:00（转为高峰）｜续航预估：约 39 天（按今日均值）」 |
+| 2026-09-21 | `scripts/widget.ps1`（XAML 新增 `NoticeBadge`/`TrayOnlyItem`、`Apply-Scale`、新增 通知与角标 段、新增 托盘图标 段、`Sync-Menu`、`Closed`） | 阶段 2：托盘图标与统一通知通道 | 新增 `NotifyIcon`（图标由 `assets/DSniang1.png` 生成）：双击切换悬浮窗、右键 立即刷新/开机自启/只留托盘/退出，退出时 `Dispose`；新增 `trayOnly`/`trayNotify` 配置并持久化；新增统一通知入口 `Show-Notice -Level -Key -Title -Text`：写 `events.json`（最多 50 条）+ 角标 + 托盘气泡，同 Key 10 分钟内只弹一次气泡（跳过时写日志）；角标为鲸鱼右上角圆点，按 红>橙>蓝 优先级取色，随镜像联动、不改变窗口尺寸 |
+| 2026-09-21 | `docs/接口文档.md`、`README.md` | 阶段 2 配套文档 | 接口文档补 `trayOnly`/`trayNotify` 字段与 `events.json` 说明、取数关系补 `peak`/`runtime`；README 补「托盘与通知」小节 |
+| 2026-09-21 | 验证记录（无代码改动） | 阶段 2 验收 | 测试台 `DEEPSEEK_WIDGET_TEST_NOTICE=1` 触发 4 条通知（含 1 条同 Key 重复）：日志出现 `托盘图标已创建`、4 条 `通知[...]` 与 1 条 `10 分钟内已弹过托盘，跳过气泡`；`events.json` 生成 4 条记录（最新在前）；快照模式（`DEEPSEEK_WIDGET_CAPTURE=1`）下角标红点显示在鲸鱼右上角，位置经一次微调后贴合头部 |
 
 ## 未纳入本次改动
 
