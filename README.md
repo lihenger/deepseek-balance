@@ -109,9 +109,9 @@ powershell -NoProfile -ExecutionPolicy Bypass -File $w -Action autostart-off
 
 **文案排版**：文字区取气泡内接矩形（480×280，居中于气泡椭圆），行高随字号按 1.1 倍缩放；文案整体超框时（超长台词、百万级金额等）自动等比缩小，不会再顶出气泡描边或被窗口边缘裁掉。
 
-**右键菜单**：大小滑块、音效开关与音量、音效集（小黄鸭 / 音效1）、用量模式（小鲸鱼记账 / 实时·令牌）、峰谷文案（默认 / 梁文峰谷 / !?强强?!）、气泡开关、开机自启、立即刷新、退出。设置写在 `%USERPROFILE%\.codex\deepseek-balance\widget.json`。
+**右键菜单**：大小滑块、音效开关与音量、音效集（小黄鸭 / 音效1 / 重载音效）、用量模式（小鲸鱼记账 / 实时·令牌）、峰谷文案（默认 / 梁文峰谷 / !?强强?!）、气泡开关、开机自启、立即刷新、退出。设置写在 `%USERPROFILE%\.codex\deepseek-balance\widget.json`。
 
-**排障**：日志在同目录 `widget.log`；窗口是分层窗口（GDI 截屏抓不到），需要核对渲染时用 `DEEPSEEK_WIDGET_SNAPSHOT=1` 启动，会在同目录生成 `widget-snapshot.png`。
+**排障**：日志在同目录 `widget.log`；窗口是分层窗口（GDI 截屏抓不到），需要核对渲染时用 `DEEPSEEK_WIDGET_SNAPSHOT=1` 启动，会在同目录生成 `widget-snapshot.png`。音效没声音时：挂件在系统睡眠恢复 / 解锁后会自动重建播放器（WPF `MediaPlayer` 睡眠后会变成不出声的"哑"实例），也可以右键菜单点「音效集 → 重载音效」，或直接重启挂件。
 
 挂件素材（鲸鱼图、动图、音效）与视觉规格来自上游项目 [MeteorNOX/DeepSeek-Balance-Whale-Widget](https://github.com/MeteorNOX/DeepSeek-Balance-Whale-Widget)（MIT），署名与许可全文见 [THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md)。
 

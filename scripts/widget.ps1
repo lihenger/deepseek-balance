@@ -356,6 +356,8 @@ $xaml = @'
       <MenuItem Header="音效集">
         <MenuItem x:Name="SoundDuck" Header="小黄鸭" IsCheckable="True" IsChecked="True"/>
         <MenuItem x:Name="SoundFx1" Header="音效1" IsCheckable="True"/>
+        <Separator/>
+        <MenuItem x:Name="SoundReload" Header="重载音效"/>
       </MenuItem>
       <Separator/>
       <MenuItem Header="用量">
@@ -462,6 +464,7 @@ $volumeSlider = $window.FindName('VolumeSlider')
 $soundItem = $window.FindName('SoundItem')
 $soundDuck = $window.FindName('SoundDuck')
 $soundFx1 = $window.FindName('SoundFx1')
+$soundReload = $window.FindName('SoundReload')
 $modeLedger = $window.FindName('ModeLedger')
 $modeToken = $window.FindName('ModeToken')
 $peakDefault = $window.FindName('PeakDefault')
@@ -492,6 +495,9 @@ $script:LastPressAt = $null
 $script:LastPressLengthMs = 150.0
 $script:ReleaseTimer = $null
 $script:PendingRelease = $null
+$script:SoundStale = $false
+$script:SoundCheckPlayer = $null
+$script:SoundHealthTimer = $null
 $script:SoundPoolSize = 3
 
 function New-SoundPlayer {
@@ -524,8 +530,27 @@ function New-SoundPlayer {
     return $player
 }
 
+function Reset-SoundPools {
+    # 睡眠/切换音频设备后，WPF 的 MediaPlayer 会变成"哑"实例：进程、音频会话都在，
+    # 就是不出声（Position 也不推进）。整池关掉重建即可恢复。
+    param([string]$Reason)
+    foreach ($key in @($script:SoundPool.Keys)) {
+        foreach ($player in @($script:SoundPool[$key])) {
+            try { $player.Stop(); $player.Close() } catch { }
+        }
+    }
+    $script:SoundPool = @{}
+    $script:SoundPoolCursor = @{}
+    $script:SoundReady = @{}
+    $script:SoundPending = @{}
+    $script:SoundLength = @{}
+    $script:SoundStale = $false
+    if ($Reason) { Write-Log ('音效播放器已重建: ' + $Reason) }
+}
+
 function Get-SoundPool {
     param([string]$Key, [string]$File)
+    if ($script:SoundStale) { Reset-SoundPools '系统唤醒或音频设备变化后重建' }
     if (-not $script:SoundPool.ContainsKey($Key)) {
         $players = New-Object System.Collections.ArrayList
         for ($i = 0; $i -lt $script:SoundPoolSize; $i++) {
@@ -626,6 +651,32 @@ function Sync-Menu {
 
 # ---------------------------------------------------------------- 声音
 
+function Start-SoundHealthCheck {
+    # 播放后检查管线是否真的在走：哑掉的实例 Position 会一直停在 0
+    param($Player)
+    $script:SoundCheckPlayer = $Player
+    if (-not $script:SoundHealthTimer) {
+        $timer = New-Object System.Windows.Threading.DispatcherTimer
+        $timer.Interval = [TimeSpan]::FromMilliseconds(400)
+        $timer.Add_Tick({
+            $script:SoundHealthTimer.Stop()
+            $checked = $script:SoundCheckPlayer
+            $script:SoundCheckPlayer = $null
+            if (-not $checked) { return }
+            try {
+                if ($checked.Position.TotalMilliseconds -lt 1) {
+                    Reset-SoundPools '播放位置未推进（播放器已失效）'
+                }
+            } catch {
+                Reset-SoundPools '播放器状态异常'
+            }
+        })
+        $script:SoundHealthTimer = $timer
+    }
+    $script:SoundHealthTimer.Stop()
+    $script:SoundHealthTimer.Start()
+}
+
 function Play-SoundFile {
     # 从播放器池里取一个播放器把整段放出来
     param([string]$Key, [string]$File, [string]$Label)
@@ -639,6 +690,7 @@ function Play-SoundFile {
             $player.Position = [TimeSpan]::Zero
             $player.Play()
             if ($script:SoundDebug) { Write-Log ('播放音效({0} #{1}): {2}' -f $Label, $index, (Split-Path $File -Leaf)) }
+            Start-SoundHealthCheck -Player $player
         } else {
             # 文件还在打开：交给 MediaOpened 回调补播，避免这次的 Play 被丢弃
             $script:SoundPending[$player] = $true
@@ -1239,6 +1291,28 @@ function Start-ReleaseAnimation {
 # 鼠标移到挂件上才开始音频唤醒保持：蓝牙设备在没有声音时会休眠，
 # 只有光标停在挂件上（即将点击）时才需要让它保持活动，平时不占用设备、不额外耗电。
 # 同时预热播放器，首次点击时不必等文件打开。
+# 睡眠恢复 / 解锁 / 音频设备变化后，WPF 的 MediaPlayer 常常变成"哑"实例：
+# 进程和音频会话都在，就是不出声。这里先把播放器池标记为过期，
+# 下次用到（鼠标移到挂件上）时会自动重建，用户感知不到。
+try {
+    [Microsoft.Win32.SystemEvents]::add_PowerModeChanged({
+        param($sender, $eventArgs)
+        if ([string]$eventArgs.Mode -eq 'Resume') {
+            $script:SoundStale = $true
+            Write-Log '系统从睡眠恢复：音效播放器将重建'
+        }
+    })
+    [Microsoft.Win32.SystemEvents]::add_SessionSwitch({
+        param($sender, $eventArgs)
+        if ([string]$eventArgs.Reason -eq 'SessionUnlock') {
+            $script:SoundStale = $true
+            Write-Log '会话解锁：音效播放器将重建'
+        }
+    })
+} catch {
+    Write-Log ('系统事件订阅失败（不影响其它功能）: ' + $_.Exception.Message)
+}
+
 $window.Add_MouseEnter({
     Warm-SoundPool
     Start-SoundKeepAlive
@@ -1347,6 +1421,11 @@ $soundFx1.Add_Click({
     $soundDuck.IsChecked = $false
     $soundFx1.IsChecked = $true
     Save-WidgetState $script:Cfg
+})
+
+$soundReload.Add_Click({
+    Reset-SoundPools '菜单手动重载'
+    Warm-SoundPool
 })
 
 $modeLedger.Add_Click({

@@ -47,6 +47,9 @@
 | 2026-09-20 | `README.md` | 补充排版规则 | 「悬浮挂件」小节新增「文案排版」说明：内接矩形 480×280、行高 1.1 倍、超框自动等比缩小 |
 | 2026-09-20 | `scripts/widget.ps1`（`Set-Mirror`、`Start-ReleaseAnimation`、`MouseLeftButtonDown` 拖动分支） | 用户反馈「拖动挂件后一直保持压缩状态，无法回弹」。根因：上一版把按压形变直接写进 `bodyScale` 基值（`ScaleY=0.88`），而拖动结束时 `Settle-Window` → `Set-Mirror` 会清掉动画并回落到基值，于是永远停在压扁状态 | `Set-Mirror` 复位 `ScaleY = 1`（它是静止状态的唯一出口）；`Start-ReleaseAnimation` 的两个动画都显式写出 `From`（0.88→1.0、±1.05→±1.0），基点被复位后仍能弹出完整回弹；拖动分支改为先 `Settle-Window`/保存位置、再播回弹与释放音效，避免动画被 `Set-Mirror` 清掉 |
 | 2026-09-20 | 验证记录（无代码改动） | 确认修复 | 测试台新增 `DEEPSEEK_WIDGET_DEBUG_SCALE=1` 定时记录 `bodyScale`：修复前模拟拖动后日志停在 `Y=0.880`，修复后回到 `X=1.000 Y=1.000`；拖到左侧吸附后为 `X=-1.000 Y=1.000`（镜像正常且未压缩）；单击后同样回到 `Y=1.000` |
+| 2026-09-21 | `scripts/widget.ps1`（新增 `Reset-SoundPools`/`Start-SoundHealthCheck`，`Get-SoundPool`、`Play-SoundFile`、`MouseEnter` 处理器、菜单新增「重载音效」） | 用户反馈「挂件无法发出音效」。实测：挂件进程（19:28 启动）自身音频会话峰值全为 0，而同一时刻另一进程新建 `MediaPlayer` 播放正常；系统日志显示当天 20:14、20:24 两次从 S3 睡眠恢复而进程一直存活——WPF 的 `MediaPlayer` 在睡眠/切换音频设备后会变成"哑"实例：进程、音频会话都在，但不出声且 `Position` 不推进 | 三重自愈：①订阅 `SystemEvents.PowerModeChanged`(Resume) 与 `SessionSwitch`(SessionUnlock)，事件发生后把播放器池标记过期，下次光标移入挂件（`Get-SoundPool`）时整池重建；②每次播放后 400ms 检查 `Position`，仍为 0 则判定失效并重建（探针实测：正常播放 500ms 后 `Position=104.5ms`，`Close()` 之后 Play 仍为 `0.0ms`）；③右键菜单「音效集」下新增「重载音效」用于手动重建 |
+| 2026-09-21 | 验证记录（无代码改动） | 确认修复 | 测试台以 `DEEPSEEK_WIDGET_TEST_BREAKSOUND=1` 把全部播放器 `Close()` 模拟失效：首次点击日志出现「音效播放器已重建: 播放位置未推进（播放器已失效）」，第二次点击即「音效已开始 / 音效播放结束」；部署并重启真实挂件后，按进程隔离峰值表测到可闻区间 927→1440ms（513ms），两段音效正常播出 |
+| 2026-09-21 | `README.md` | 同步用户可见变化 | 右键菜单列表补上「重载音效」；「排障」小节补充音效无声时的处理方式（自动重建 / 菜单手动重载 / 重启挂件） |
 
 ## 未纳入本次改动
 
