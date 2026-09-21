@@ -81,7 +81,6 @@ function Get-DefaultState {
         usageMode = 'ledger'
         peakMode  = 'default'
         bubbleOn  = $true
-        trayOnly  = $false
         trayNotify = $true
         balanceAlert = 5
         dailyBudget  = 0
@@ -394,11 +393,14 @@ $xaml = @'
         <MenuItem x:Name="AlertBalance10" Header="余额告警：¥10" IsCheckable="True"/>
         <MenuItem x:Name="AlertBalance20" Header="余额告警：¥20" IsCheckable="True"/>
         <Separator/>
+        <MenuItem x:Name="AlertBalanceCustom" Header="自定义…"/>
+        <Separator/>
         <MenuItem x:Name="BudgetOff" Header="今日预算：关" IsCheckable="True" IsChecked="True"/>
         <MenuItem x:Name="Budget1" Header="今日预算：¥1" IsCheckable="True"/>
         <MenuItem x:Name="Budget3" Header="今日预算：¥3" IsCheckable="True"/>
         <MenuItem x:Name="Budget5" Header="今日预算：¥5" IsCheckable="True"/>
         <MenuItem x:Name="Budget10" Header="今日预算：¥10" IsCheckable="True"/>
+        <MenuItem x:Name="BudgetCustom" Header="自定义…"/>
         <Separator/>
         <MenuItem x:Name="PeakNoticeItem" Header="峰谷切换提醒" IsCheckable="True" IsChecked="True"/>
       </MenuItem>
@@ -407,11 +409,10 @@ $xaml = @'
       <MenuItem x:Name="UpdateCheckItem" Header="自动检查更新" IsCheckable="True" IsChecked="True"/>
       <Separator/>
       <MenuItem x:Name="BubbleItem" Header="气泡" IsCheckable="True" IsChecked="True"/>
-      <MenuItem x:Name="TrayOnlyItem" Header="只留托盘（隐藏悬浮窗）" IsCheckable="True"/>
+      <MenuItem x:Name="CloseWindowItem" Header="关闭悬浮窗"/>
       <MenuItem x:Name="AutostartItem" Header="开机自启" IsCheckable="True"/>
       <Separator/>
       <MenuItem x:Name="RefreshItem" Header="立即刷新"/>
-      <MenuItem x:Name="ExitItem" Header="退出"/>
     </ContextMenu>
   </Window.ContextMenu>
   <!-- RootGrid 全透明：分层窗口里 alpha=0 的像素不参与命中测试，点击会穿透到下层窗口。
@@ -517,20 +518,21 @@ $alertBalance3 = $window.FindName('AlertBalance3')
 $alertBalance5 = $window.FindName('AlertBalance5')
 $alertBalance10 = $window.FindName('AlertBalance10')
 $alertBalance20 = $window.FindName('AlertBalance20')
+$alertBalanceCustom = $window.FindName('AlertBalanceCustom')
 $budgetOff = $window.FindName('BudgetOff')
 $budget1 = $window.FindName('Budget1')
 $budget3 = $window.FindName('Budget3')
 $budget5 = $window.FindName('Budget5')
 $budget10 = $window.FindName('Budget10')
+$budgetCustom = $window.FindName('BudgetCustom')
 $peakNoticeItem = $window.FindName('PeakNoticeItem')
 $recentEventsItem = $window.FindName('RecentEventsItem')
 $updateItem = $window.FindName('UpdateItem')
 $updateCheckItem = $window.FindName('UpdateCheckItem')
 $bubbleItem = $window.FindName('BubbleItem')
-$trayOnlyItem = $window.FindName('TrayOnlyItem')
+$closeWindowItem = $window.FindName('CloseWindowItem')
 $autostartItem = $window.FindName('AutostartItem')
 $refreshItem = $window.FindName('RefreshItem')
-$exitItem = $window.FindName('ExitItem')
 
 if (Test-Path -LiteralPath $WhalePng) {
     $whaleImage.Source = New-Object System.Windows.Media.Imaging.BitmapImage (New-Object System.Uri $WhalePng)
@@ -604,7 +606,8 @@ function Reset-SoundPools {
     $script:SoundStale = $false
     if ($Reason) {
         Write-Log ('音效播放器已重建: ' + $Reason)
-        Show-Notice -Level 'orange' -Key 'sound-rebuild' -Title '音效播放器已重建' -Text $Reason
+        Show-Notice -Level 'orange' -Key 'sound-rebuild' -Title '音效播放器已重建' -Text $Reason `
+            -Reason 'sound' -TtlSeconds $script:SoundBadgeTtlSeconds
     }
 }
 
@@ -696,15 +699,26 @@ function Stop-SoundKeepAlive {
 # 同一 Key 10 分钟内不重复弹托盘，但事件与角标照记。
 $EventsFile = Join-Path $StateDir 'events.json'
 $script:NoticeDedup = @{}
-$script:NoticeLevels = @{ red = $false; orange = $false; blue = $false }
+# 角标按"来源"独立置位/清除，颜色由来源聚合（红 > 橙 > 蓝）：
+#   fetch（取数失败）/ balance（余额告警）→ 红；budget（今日预算）/ sound（音效重建）→ 橙；
+#   update（有新版本）/ peak（峰谷提示）→ 蓝
+$script:NoticeReasons = @{
+    fetch   = $false
+    balance = $false
+    budget  = $false
+    sound   = $false
+    update  = $false
+    peak    = $false
+}
+$script:SoundBadgeTtlSeconds = 600
 $script:NoticeClearTimers = @{}
 $script:TrayIcon = $null
 $script:TrayMenu = $null
 
 function Get-NoticeLevel {
-    if ($script:NoticeLevels['red']) { return 'red' }
-    if ($script:NoticeLevels['orange']) { return 'orange' }
-    if ($script:NoticeLevels['blue']) { return 'blue' }
+    foreach ($reason in @('fetch', 'balance')) { if ($script:NoticeReasons[$reason]) { return 'red' } }
+    foreach ($reason in @('budget', 'sound')) { if ($script:NoticeReasons[$reason]) { return 'orange' } }
+    foreach ($reason in @('update', 'peak')) { if ($script:NoticeReasons[$reason]) { return 'blue' } }
     return 'none'
 }
 
@@ -723,11 +737,27 @@ function Update-NoticeBadge {
     $noticeBadge.Visibility = 'Visible'
 }
 
-function Clear-NoticeLevel {
-    param([string]$Level)
-    if (-not $Level) { return }
-    $script:NoticeLevels[$Level] = $false
+function Set-NoticeReason {
+    # 置位/清除单个来源，并刷新角标；TtlSeconds > 0 时到点自动清除
+    param([string]$Reason, [bool]$On, [int]$TtlSeconds = 0)
+    if (-not $script:NoticeReasons.ContainsKey($Reason)) { return }
+    $script:NoticeReasons[$Reason] = $On
     Update-NoticeBadge
+    if ($script:NoticeClearTimers[$Reason]) {
+        try { $script:NoticeClearTimers[$Reason].Stop() } catch { }
+        $script:NoticeClearTimers.Remove($Reason)
+    }
+    if ($On -and $TtlSeconds -gt 0) {
+        $reasonName = $Reason
+        $timer = New-Object System.Windows.Threading.DispatcherTimer
+        $timer.Interval = [TimeSpan]::FromSeconds($TtlSeconds)
+        $timer.Add_Tick({
+            try { $script:NoticeClearTimers[$reasonName].Stop() } catch { }
+            Set-NoticeReason -Reason $reasonName -On $false
+        }.GetNewClosure())
+        $script:NoticeClearTimers[$Reason] = $timer
+        $timer.Start()
+    }
 }
 
 function Add-NoticeEvent {
@@ -746,7 +776,7 @@ function Add-NoticeEvent {
             text  = $Text
         }
         $list = @($entry) + @($list)
-        if ($list.Count -gt 50) { $list = $list[0..49] }
+        if ($list.Count -gt 10) { $list = $list[0..9] }
         ($list | ConvertTo-Json -Depth 4) | Set-Content -LiteralPath $EventsFile -Encoding UTF8
     } catch {
         Write-Log ('事件记录写入失败: ' + $_.Exception.Message)
@@ -759,29 +789,14 @@ function Show-Notice {
         [string]$Key = 'general',
         [string]$Title = 'DeepSeek 余额挂件',
         [string]$Text = '',
-        [int]$ClearAfterSeconds = 0,
+        [string]$Reason = '',
+        [int]$TtlSeconds = 0,
         [switch]$Silent
     )
     Add-NoticeEvent -Level $Level -Key $Key -Title $Title -Text $Text
     Write-Log ('通知[{0}/{1}] {2} {3}' -f $Level, $Key, $Title, $Text)
     if ($Silent) { return }
-    $script:NoticeLevels[$Level] = $true
-    Update-NoticeBadge
-    if ($ClearAfterSeconds -gt 0) {
-        # 纯提示类通知（例如峰谷切换）过一会儿自动收回角标，避免一直亮着
-        $levelName = $Level
-        if ($script:NoticeClearTimers[$levelName]) {
-            try { $script:NoticeClearTimers[$levelName].Stop() } catch { }
-        }
-        $timer = New-Object System.Windows.Threading.DispatcherTimer
-        $timer.Interval = [TimeSpan]::FromSeconds($ClearAfterSeconds)
-        $timer.Add_Tick({
-            try { $script:NoticeClearTimers[$levelName].Stop() } catch { }
-            Clear-NoticeLevel -Level $levelName
-        }.GetNewClosure())
-        $script:NoticeClearTimers[$levelName] = $timer
-        $timer.Start()
-    }
+    if ($Reason) { Set-NoticeReason -Reason $Reason -On $true -TtlSeconds $TtlSeconds }
     if (-not $script:Cfg.trayNotify) { return }
     $now = Get-Date
     $last = $script:NoticeDedup[$Key]
@@ -806,23 +821,18 @@ function Show-Notice {
 
 function Show-FloatingWindow {
     try {
-        if (-not $window.IsVisible) { $window.Show() }
+        $wasVisible = $window.IsVisible
+        if (-not $wasVisible) { $window.Show() }
         $window.Activate()
+        Write-Log ('悬浮窗已显示（此前可见={0}）' -f $wasVisible)
     } catch { }
 }
 
 function Hide-FloatingWindow {
-    try { $window.Hide() } catch { }
-}
-
-function Set-TrayOnly {
-    param([bool]$Enabled)
-    $script:Cfg.trayOnly = $Enabled
-    if ($Enabled) { Hide-FloatingWindow } else { Show-FloatingWindow }
-    if ($trayOnlyItem) { $trayOnlyItem.IsChecked = $Enabled }
-    if ($script:TrayItemTrayOnly) { $script:TrayItemTrayOnly.Checked = $Enabled }
-    Save-WidgetState $script:Cfg
-    Write-Log ('只留托盘: {0}（悬浮窗可见={1}）' -f $Enabled, $window.IsVisible)
+    try {
+        $window.Hide()
+        Write-Log ('悬浮窗已关闭（托盘图标保留，可用托盘左键单击或托盘菜单「显示悬浮窗」找回；窗口可见={0}）' -f $window.IsVisible)
+    } catch { }
 }
 
 function Initialize-TrayIcon {
@@ -841,9 +851,7 @@ function Initialize-TrayIcon {
         $script:TrayItemAutostart = $menu.Items.Add('开机自启')
         $script:TrayItemAutostart.CheckOnClick = $true
         $script:TrayItemAutostart.Checked = Test-Path -LiteralPath $ShortcutPath
-        $script:TrayItemTrayOnly = $menu.Items.Add('只留托盘（隐藏悬浮窗）')
-        $script:TrayItemTrayOnly.CheckOnClick = $true
-        $script:TrayItemTrayOnly.Checked = [bool]$script:Cfg.trayOnly
+        $script:TrayItemShowWindow = $menu.Items.Add('显示悬浮窗')
         $script:TrayItemExit = $menu.Items.Add('退出')
 
         $script:TrayItemRefresh.Add_Click({
@@ -859,9 +867,13 @@ function Initialize-TrayIcon {
             $script:TrayItemAutostart.Checked = Test-Path -LiteralPath $ShortcutPath
             Sync-Menu
         })
-        $script:TrayItemTrayOnly.Add_Click({ Set-TrayOnly -Enabled ([bool]$script:TrayItemTrayOnly.Checked) })
+        $script:TrayItemShowWindow.Add_Click({ Show-FloatingWindow })
         $script:TrayItemExit.Add_Click({ $window.Close() })
-        $icon.add_MouseDoubleClick({ Show-FloatingWindow })
+        # 托盘左键单击 = 显示并前置悬浮窗（右键仍由 ContextMenuStrip 处理）
+        $icon.add_MouseClick({
+            param($sender, $eventArgs)
+            if ($eventArgs.Button -eq [System.Windows.Forms.MouseButtons]::Left) { Show-FloatingWindow }
+        })
 
         $icon.ContextMenuStrip = $menu
         $icon.Visible = $true
@@ -906,7 +918,8 @@ function Test-PeakNotice {
         $key = 'peak-switch:' + $info.nextChangeAtSec
         if ($script:LastPeakNoticeKey -eq $key) { return }
         $script:LastPeakNoticeKey = $key
-        Show-Notice -Level 'blue' -Key $key -Title ('已进入' + $toLabel) -Text ('现在起按' + $toLabel + '计费') -ClearAfterSeconds 60
+        Show-Notice -Level 'blue' -Key $key -Title ('已进入' + $toLabel) -Text ('现在起按' + $toLabel + '计费') `
+            -Reason 'peak' -TtlSeconds 60
         Show-PeakBubble -IsPeak ([bool]$info.nextIsPeak)
         return
     }
@@ -916,7 +929,7 @@ function Test-PeakNotice {
         $script:LastPeakPreKey = $preKey
         $minutes = [Math]::Max(1, [Math]::Round($seconds / 60))
         Show-Notice -Level 'blue' -Key $preKey -Title ('{0} 分钟后进入{1}' -f $minutes, $toLabel) `
-            -Text ('当前为{0}，可以安排跑量' -f $fromLabel) -ClearAfterSeconds 60
+            -Text ('当前为{0}，可以安排跑量' -f $fromLabel) -Reason 'peak' -TtlSeconds 60
     }
 }
 
@@ -928,15 +941,92 @@ function Report-FetchFailure {
         'no_api_key' { '未配置密钥 · 点击重试' }
         default { '取数失败 · 点击重试' }
     }
-    Show-Notice -Level 'red' -Key ('fetch:' + $Code) -Title '取数失败' -Text ([string]$Message)
+    Show-Notice -Level 'red' -Key ('fetch:' + $Code) -Title '取数失败' -Text ([string]$Message) -Reason 'fetch'
+}
+
+function Format-ThresholdText {
+    param([double]$Value)
+    if ($Value -le 0) { return '关' }
+    return ('¥{0:0.##}' -f $Value)
+}
+
+function Apply-CustomThreshold {
+    # 校验并应用自定义阈值（纯逻辑，对话框与测试台共用）
+    param([string]$Kind, [string]$Text)
+    $raw = ([string]$Text).Trim()
+    if (-not $raw) { return @{ ok = $false; message = '请输入数字，0 表示关闭这项告警' } }
+    $normalized = $raw -replace '[¥￥元\s]', ''
+    $value = 0.0
+    if (-not [double]::TryParse($normalized, [ref]$value)) {
+        return @{ ok = $false; message = '只能填数字，例如 5 或 2.5' }
+    }
+    if ($value -lt 0 -or $value -gt 9999) {
+        return @{ ok = $false; message = '范围是 0–9999（0 表示关闭）' }
+    }
+    $value = [Math]::Round($value, 2)
+    switch ($Kind) {
+        'balance' {
+            $script:Cfg.balanceAlert = $value
+            $script:LastBalanceAlertAt = $null
+        }
+        'budget' {
+            $script:Cfg.dailyBudget = $value
+            $script:LastBudgetAlertDate = $null
+        }
+        default { return @{ ok = $false; message = '未知的告警类型' } }
+    }
+    Save-WidgetState $script:Cfg
+    Sync-Menu
+    Test-Alerts
+    Write-Log ('自定义阈值: {0} = {1}' -f $Kind, $value)
+    return @{ ok = $true; message = ''; value = $value }
+}
+
+function Show-ThresholdDialog {
+    param([string]$Kind)
+    $isBalance = ($Kind -eq 'balance')
+    $title = if ($isBalance) { '余额告警阈值' } else { '今日预算阈值' }
+    $hint = if ($isBalance) { '余额低于该值时提醒；0 表示关闭余额告警' } else { '今日用量超过该值时提醒；0 表示关闭今日预算' }
+    $current = if ($isBalance) { [double]$script:Cfg.balanceAlert } else { [double]$script:Cfg.dailyBudget }
+    $currentText = if ($current -le 0) { '0' } else { $current.ToString('0.##') }
+    $dialogXaml = @"
+<Window xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
+        xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+        Title="$title" Width="330" SizeToContent="Height"
+        WindowStartupLocation="CenterOwner" ResizeMode="NoResize"
+        ShowInTaskbar="False" Topmost="True" FontFamily="Microsoft YaHei UI, Segoe UI">
+  <StackPanel Margin="16">
+    <TextBlock Text="$hint" TextWrapping="Wrap" Foreground="#444444"/>
+    <TextBox x:Name="ValueBox" Margin="0,10,0,0" Padding="6,4" FontSize="14" Text="$currentText"/>
+    <TextBlock x:Name="ErrorText" Margin="0,6,0,0" Foreground="#e0433f" TextWrapping="Wrap"/>
+    <TextBlock Text="单位：元；最多两位小数；范围 0–9999" Margin="0,6,0,0" Foreground="#888888" FontSize="11"/>
+    <StackPanel Orientation="Horizontal" HorizontalAlignment="Right" Margin="0,12,0,0">
+      <Button x:Name="OkButton" Content="确定" Width="76" IsDefault="True"/>
+      <Button x:Name="CancelButton" Content="取消" Width="76" Margin="8,0,0,0" IsCancel="True"/>
+    </StackPanel>
+  </StackPanel>
+</Window>
+"@
+    $dialog = [Windows.Markup.XamlReader]::Parse($dialogXaml)
+    $dialog.Owner = $window
+    $box = $dialog.FindName('ValueBox')
+    $errText = $dialog.FindName('ErrorText')
+    $okButton = $dialog.FindName('OkButton')
+    $cancelButton = $dialog.FindName('CancelButton')
+    $okButton.Add_Click({
+        $result = Apply-CustomThreshold -Kind $Kind -Text $box.Text
+        if ($result.ok) { $dialog.DialogResult = $true } else { $errText.Text = $result.message }
+    }.GetNewClosure())
+    $cancelButton.Add_Click({ $dialog.DialogResult = $false }.GetNewClosure())
+    $dialog.Add_Loaded({ $box.Focus(); $box.SelectAll() }.GetNewClosure())
+    [void]$dialog.ShowDialog()
 }
 
 function Test-Alerts {
     $balance = $script:ShownBalance
     $alert = [double]$script:Cfg.balanceAlert
     if ($alert -gt 0 -and $null -ne $balance -and [double]$balance -le $alert) {
-        $script:NoticeLevels['red'] = $true
-        Update-NoticeBadge
+        Set-NoticeReason -Reason 'balance' -On $true
         $now = Get-Date
         if (-not $script:LastBalanceAlertAt -or (($now - $script:LastBalanceAlertAt).TotalHours -ge 6)) {
             $script:LastBalanceAlertAt = $now
@@ -947,18 +1037,22 @@ function Test-Alerts {
             Show-Notice -Level 'red' -Key 'alert:balance' -Title '余额不足' `
                 -Text ('余额 ¥{0:N2} 已低于告警线 ¥{1:N2}{2}' -f [double]$balance, $alert, $extra)
         }
+    } else {
+        # 告警关闭 / 阈值调高 / 余额回升：角标立即消失
+        Set-NoticeReason -Reason 'balance' -On $false
     }
 
     $budget = [double]$script:Cfg.dailyBudget
     if ($budget -gt 0 -and $null -ne $script:TodayUsage -and [double]$script:TodayUsage -ge $budget) {
-        $script:NoticeLevels['orange'] = $true
-        Update-NoticeBadge
+        Set-NoticeReason -Reason 'budget' -On $true
         $today = Get-Date -Format 'yyyy-MM-dd'
         if ($script:LastBudgetAlertDate -ne $today) {
             $script:LastBudgetAlertDate = $today
             Show-Notice -Level 'orange' -Key 'alert:budget' -Title '今日预算已超' `
                 -Text ('今日已用 ¥{0:N2}，已超过预算 ¥{1:N2}' -f [double]$script:TodayUsage, $budget)
         }
+    } else {
+        Set-NoticeReason -Reason 'budget' -On $false
     }
 }
 
@@ -1022,6 +1116,9 @@ function Test-PluginUpdate {
         return
     }
     if ($remoteSha -eq $localSha) {
+        Set-NoticeReason -Reason 'update' -On $false
+        if ($updateItem) { $updateItem.Visibility = 'Collapsed' }
+        $script:UpdateInfo = $null
         Write-Log ('更新检查：已是最新（' + $localSha.Substring(0, 7) + '）')
         return
     }
@@ -1037,7 +1134,8 @@ function Test-PluginUpdate {
     if ($script:LastUpdateNoticeSha -ne $remoteSha) {
         $script:LastUpdateNoticeSha = $remoteSha
         Show-Notice -Level 'blue' -Key 'update' -Title '有新版本' `
-            -Text ('本地 {0}，远端 {1}，右键菜单可打开仓库' -f $script:UpdateInfo.local, $script:UpdateInfo.remote)
+            -Text ('本地 {0}，远端 {1}，右键菜单可打开仓库' -f $script:UpdateInfo.local, $script:UpdateInfo.remote) `
+            -Reason 'update'
     }
     Write-Log ('更新检查：发现新版本 本地 {0} / 远端 {1}' -f $script:UpdateInfo.local, $script:UpdateInfo.remote)
 }
@@ -1117,10 +1215,11 @@ function Sync-Menu {
     $budget3.IsChecked = ($dailyBudget -eq 3)
     $budget5.IsChecked = ($dailyBudget -eq 5)
     $budget10.IsChecked = ($dailyBudget -eq 10)
+    $alertBalanceCustom.Header = ('自定义…（当前 {0}）' -f (Format-ThresholdText $balanceAlert))
+    $budgetCustom.Header = ('自定义…（当前 {0}）' -f (Format-ThresholdText $dailyBudget))
     $peakNoticeItem.IsChecked = [bool]$script:Cfg.peakNotice
     $updateCheckItem.IsChecked = [bool]$script:Cfg.updateCheck
     $bubbleItem.IsChecked = [bool]$script:Cfg.bubbleOn
-    $trayOnlyItem.IsChecked = [bool]$script:Cfg.trayOnly
     $autostartItem.IsChecked = (Test-Path -LiteralPath $ShortcutPath)
     Update-RecentEventsMenu
     $script:SyncingMenu = $false
@@ -1652,7 +1751,7 @@ function Complete-BalanceRefresh {
                     # 自愈可见化：恢复时清掉红色角标并记一条恢复事件
                     $script:FetchFailed = $false
                     $script:StatusHint = ''
-                    Clear-NoticeLevel -Level 'red'
+                    Set-NoticeReason -Reason 'fetch' -On $false
                     Show-Notice -Level 'blue' -Key 'fetch-recovered' -Title '取数已恢复' -Text '余额接口恢复正常' -Silent
                 }
                 Test-Alerts
@@ -2011,6 +2110,9 @@ $peakNoticeItem.Add_Click({
     Save-WidgetState $script:Cfg
 })
 
+$alertBalanceCustom.Add_Click({ Show-ThresholdDialog -Kind 'balance' })
+$budgetCustom.Add_Click({ Show-ThresholdDialog -Kind 'budget' })
+
 $updateCheckItem.Add_Click({
     $script:Cfg.updateCheck = [bool]$updateCheckItem.IsChecked
     Save-WidgetState $script:Cfg
@@ -2020,6 +2122,8 @@ $updateCheckItem.Add_Click({
 $updateItem.Add_Click({
     if ($script:UpdateInfo) {
         try { Start-Process -FilePath $script:UpdateInfo.url } catch { }
+        # 已经带用户去看仓库了，蓝色角标的使命结束
+        Set-NoticeReason -Reason 'update' -On $false
     }
 })
 
@@ -2029,8 +2133,8 @@ $bubbleItem.Add_Click({
     Save-WidgetState $script:Cfg
 })
 
-$trayOnlyItem.Add_Click({
-    Set-TrayOnly -Enabled ([bool]$trayOnlyItem.IsChecked)
+$closeWindowItem.Add_Click({
+    Hide-FloatingWindow
 })
 
 $autostartItem.Add_Click({
@@ -2046,7 +2150,6 @@ $refreshItem.Add_Click({
     $script:RefreshIsManual = $true
     Start-BalanceRefresh
 })
-$exitItem.Add_Click({ $window.Close() })
 
 $window.Add_Closed({
     Stop-SoundKeepAlive
@@ -2116,10 +2219,6 @@ $window.Add_Loaded({
     $script:PeakTick.Start()
     Initialize-TrayIcon
     Start-UpdateCheckTimer
-    if ($script:Cfg.trayOnly) {
-        Hide-FloatingWindow
-        Write-Log '启动时按状态隐藏悬浮窗（只留托盘）'
-    }
 })
 
 # 不能再用 ShowDialog()：WPF 里"隐藏模态窗口"会结束模态循环，脚本会接着往下走并退出进程
