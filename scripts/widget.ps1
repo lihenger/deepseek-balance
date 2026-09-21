@@ -342,6 +342,8 @@ $script:LastPeakNoticeKey = $null
 $script:LastPeakPreKey = $null
 $script:LastBalanceAlertAt = $null
 $script:LastBudgetAlertDate = $null
+$script:FetchFailed = $false
+$script:StatusHint = ''
 
 $xaml = @'
 <Window xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
@@ -396,6 +398,7 @@ $xaml = @'
         <Separator/>
         <MenuItem x:Name="PeakNoticeItem" Header="峰谷切换提醒" IsCheckable="True" IsChecked="True"/>
       </MenuItem>
+      <MenuItem x:Name="RecentEventsItem" Header="最近事件"/>
       <Separator/>
       <MenuItem x:Name="BubbleItem" Header="气泡" IsCheckable="True" IsChecked="True"/>
       <MenuItem x:Name="TrayOnlyItem" Header="只留托盘（隐藏悬浮窗）" IsCheckable="True"/>
@@ -514,6 +517,7 @@ $budget3 = $window.FindName('Budget3')
 $budget5 = $window.FindName('Budget5')
 $budget10 = $window.FindName('Budget10')
 $peakNoticeItem = $window.FindName('PeakNoticeItem')
+$recentEventsItem = $window.FindName('RecentEventsItem')
 $bubbleItem = $window.FindName('BubbleItem')
 $trayOnlyItem = $window.FindName('TrayOnlyItem')
 $autostartItem = $window.FindName('AutostartItem')
@@ -590,7 +594,10 @@ function Reset-SoundPools {
     $script:SoundPending = @{}
     $script:SoundLength = @{}
     $script:SoundStale = $false
-    if ($Reason) { Write-Log ('音效播放器已重建: ' + $Reason) }
+    if ($Reason) {
+        Write-Log ('音效播放器已重建: ' + $Reason)
+        Show-Notice -Level 'orange' -Key 'sound-rebuild' -Title '音效播放器已重建' -Text $Reason
+    }
 }
 
 function Get-SoundPool {
@@ -744,12 +751,14 @@ function Show-Notice {
         [string]$Key = 'general',
         [string]$Title = 'DeepSeek 余额挂件',
         [string]$Text = '',
-        [int]$ClearAfterSeconds = 0
+        [int]$ClearAfterSeconds = 0,
+        [switch]$Silent
     )
     Add-NoticeEvent -Level $Level -Key $Key -Title $Title -Text $Text
+    Write-Log ('通知[{0}/{1}] {2} {3}' -f $Level, $Key, $Title, $Text)
+    if ($Silent) { return }
     $script:NoticeLevels[$Level] = $true
     Update-NoticeBadge
-    Write-Log ('通知[{0}/{1}] {2} {3}' -f $Level, $Key, $Title, $Text)
     if ($ClearAfterSeconds -gt 0) {
         # 纯提示类通知（例如峰谷切换）过一会儿自动收回角标，避免一直亮着
         $levelName = $Level
@@ -903,6 +912,17 @@ function Test-PeakNotice {
     }
 }
 
+function Report-FetchFailure {
+    param([string]$Code, [string]$Message)
+    $script:FetchFailed = $true
+    $script:StatusHint = switch ($Code) {
+        'network' { '网络异常 · 点击重试' }
+        'no_api_key' { '未配置密钥 · 点击重试' }
+        default { '取数失败 · 点击重试' }
+    }
+    Show-Notice -Level 'red' -Key ('fetch:' + $Code) -Title '取数失败' -Text ([string]$Message)
+}
+
 function Test-Alerts {
     $balance = $script:ShownBalance
     $alert = [double]$script:Cfg.balanceAlert
@@ -934,6 +954,44 @@ function Test-Alerts {
     }
 }
 
+function Update-RecentEventsMenu {
+    # 「最近事件」子菜单：右键打开时刷新，列出最近 5 条，点条目打开事件目录
+    if (-not $recentEventsItem) { return }
+    $recentEventsItem.Items.Clear()
+    $list = @()
+    if (Test-Path -LiteralPath $EventsFile) {
+        try {
+            $parsed = Get-Content -LiteralPath $EventsFile -Raw -Encoding UTF8 | ConvertFrom-Json
+            if ($parsed) { $list = @($parsed) }
+        } catch { }
+    }
+    if ($list.Count -eq 0) {
+        $empty = New-Object System.Windows.Controls.MenuItem
+        $empty.Header = '暂无事件'
+        $empty.IsEnabled = $false
+        [void]$recentEventsItem.Items.Add($empty)
+        return
+    }
+    foreach ($entry in ($list | Select-Object -First 5)) {
+        $item = New-Object System.Windows.Controls.MenuItem
+        $stamp = [string]$entry.at
+        if ($stamp.Length -ge 16) { $stamp = $stamp.Substring(5, 11) }
+        $item.Header = ('{0}  {1}' -f $stamp, [string]$entry.title)
+        if ($entry.text) { $item.ToolTip = [string]$entry.text }
+        $item.Add_Click({
+            try { Start-Process -FilePath 'explorer.exe' -ArgumentList $StateDir } catch { }
+        })
+        [void]$recentEventsItem.Items.Add($item)
+    }
+    [void]$recentEventsItem.Items.Add((New-Object System.Windows.Controls.Separator))
+    $open = New-Object System.Windows.Controls.MenuItem
+    $open.Header = '打开事件目录'
+    $open.Add_Click({
+        try { Start-Process -FilePath 'explorer.exe' -ArgumentList $StateDir } catch { }
+    })
+    [void]$recentEventsItem.Items.Add($open)
+}
+
 function Sync-Menu {
     $script:SyncingMenu = $true
     $scaleSlider.Value = $script:Cfg.scale
@@ -962,6 +1020,7 @@ function Sync-Menu {
     $bubbleItem.IsChecked = [bool]$script:Cfg.bubbleOn
     $trayOnlyItem.IsChecked = [bool]$script:Cfg.trayOnly
     $autostartItem.IsChecked = (Test-Path -LiteralPath $ShortcutPath)
+    Update-RecentEventsMenu
     $script:SyncingMenu = $false
 }
 
@@ -1288,6 +1347,7 @@ $script:RefreshIsManual = $false
 
 function Get-HintText {
     if ($script:Status -eq 'error') {
+        if ($script:StatusHint) { return $script:StatusHint }
         if ($script:Message) {
             $trimmed = [string]$script:Message
             if ($trimmed.Length -gt 14) { $trimmed = $trimmed.Substring(0, 14) }
@@ -1486,6 +1546,13 @@ function Complete-BalanceRefresh {
                 $script:PeakInfo = $payload.peak
                 Animate-Amount $newBalance
                 Render-Balance
+                if ($script:FetchFailed) {
+                    # 自愈可见化：恢复时清掉红色角标并记一条恢复事件
+                    $script:FetchFailed = $false
+                    $script:StatusHint = ''
+                    Clear-NoticeLevel -Level 'red'
+                    Show-Notice -Level 'blue' -Key 'fetch-recovered' -Title '取数已恢复' -Text '余额接口恢复正常' -Silent
+                }
                 Test-Alerts
                 Test-PeakNotice
                 foreach ($warning in @($payload.warnings)) {
@@ -1495,18 +1562,19 @@ function Complete-BalanceRefresh {
                 $script:Status = 'error'
                 $script:Message = [string]$payload.error
                 Render-Balance
-                Write-Log ('取数失败: ' + $payload.code + ' ' + $payload.error)
+                Report-FetchFailure -Code ([string]$payload.code) -Message ([string]$payload.error)
             }
         } else {
             $script:Status = 'error'
             $script:Message = 'balance.mjs 无输出'
             Render-Balance
+            Report-FetchFailure -Code 'no_output' -Message 'balance.mjs 无输出'
         }
     } catch {
         $script:Status = 'error'
         $script:Message = '取数异常'
         Render-Balance
-        Write-Log ('取数异常: ' + $_.Exception.Message)
+        Report-FetchFailure -Code 'exception' -Message $_.Exception.Message
     } finally {
         try { $script:RefreshPipeline.Dispose() } catch { }
         $script:RefreshPipeline = $null
