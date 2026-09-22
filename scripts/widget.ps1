@@ -1999,21 +1999,24 @@ function Set-Mirror {
 
 function Settle-Window {
     $area = [System.Windows.SystemParameters]::WorkArea
-    $size = [double]$window.Width
+    # 气泡大小会让窗口不再是正方形（宽 ≠ 高），两个轴必须各取各的尺寸，
+    # 否则吸附到底部时会差出 (宽 - 高) 那么多，看起来就是不贴边。
+    $width = [double]$window.Width
+    $height = [double]$window.Height
     $left = $script:Cfg.left
     $top = $script:Cfg.top
-    if ($null -eq $left) { $left = $area.Right - $size - 12 }
-    if ($null -eq $top) { $top = $area.Bottom - $size - 12 }
+    if ($null -eq $left) { $left = $area.Right - $width - 12 }
+    if ($null -eq $top) { $top = $area.Bottom - $height - 12 }
     switch ($script:Cfg.snapH) {
         'left' { $left = $area.Left }
-        'right' { $left = $area.Right - $size }
+        'right' { $left = $area.Right - $width }
     }
     switch ($script:Cfg.snapV) {
         'top' { $top = $area.Top }
-        'bottom' { $top = $area.Bottom - $size }
+        'bottom' { $top = $area.Bottom - $height }
     }
-    $left = [Math]::Max($area.Left, [Math]::Min([double]$left, $area.Right - $size))
-    $top = [Math]::Max($area.Top, [Math]::Min([double]$top, $area.Bottom - $size))
+    $left = [Math]::Max($area.Left, [Math]::Min([double]$left, $area.Right - $width))
+    $top = [Math]::Max($area.Top, [Math]::Min([double]$top, $area.Bottom - $height))
     $window.Left = $left
     $window.Top = $top
     $script:Cfg.left = $left
