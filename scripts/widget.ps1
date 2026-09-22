@@ -50,6 +50,13 @@ $ShortcutPath = Join-Path ([Environment]::GetFolderPath('Startup')) 'DeepSeek �
 $WhalePng = Join-Path $AssetsDir 'DSniang1.png'
 $RuaGif = Join-Path $AssetsDir 'rua.gif'
 
+# 宿主进程名：任务管理器里显示的是宿主可执行文件名。挂件统一用状态目录下的
+# deepseek-balance.exe 运行（见 Ensure-HostExe），旧版本或回退时用 powershell/pwsh。
+$HostExeName = 'deepseek-balance'
+$HostExePath = Join-Path $StateDir ($HostExeName + '.exe')
+$HostProcessNames = @($HostExeName, 'powershell', 'pwsh')
+$HostRelaunchEnv = 'DEEPSEEK_BALANCE_HOST_RELAUNCH'
+
 $SoundSets = @{
     duck = @{ press = 'Ya1.mp3'; release = 'Ya2.mp3' }
     fx1  = @{ press = 'D1.mp3';  release = 'D2.mp3' }
@@ -140,7 +147,8 @@ function Get-RunningPid {
         $pidValue = 0
         if (-not [int]::TryParse($raw, [ref]$pidValue)) { return $null }
         $proc = Get-Process -Id $pidValue -ErrorAction SilentlyContinue
-        if ($proc -and ($proc.ProcessName -eq 'powershell' -or $proc.ProcessName -eq 'pwsh')) { return $pidValue }
+        # deepseek-balance 是宿主副本的进程名（见 Ensure-HostExe），旧版本用 powershell/pwsh 启动
+        if ($proc -and ($HostProcessNames -contains $proc.ProcessName)) { return $pidValue }
     } catch { }
     return $null
 }
@@ -152,6 +160,66 @@ function Get-NodePath {
         if (Test-Path -LiteralPath $candidate) { return $candidate }
     }
     return 'node'
+}
+
+# ---------------------------------------------------------------- 宿主进程名
+
+function Get-SystemHostExe {
+    foreach ($candidate in @((Join-Path $PSHOME 'powershell.exe'),
+                             (Join-Path $env:SystemRoot 'System32\WindowsPowerShell\v1.0\powershell.exe'))) {
+        if ($candidate -and (Test-Path -LiteralPath $candidate)) { return $candidate }
+    }
+    return $null
+}
+
+function Get-CurrentHostName {
+    try {
+        $proc = Get-Process -Id $PID -ErrorAction SilentlyContinue
+        if ($proc) { return $proc.ProcessName }
+    } catch { }
+    return ''
+}
+
+function Ensure-HostExe {
+    # 把系统 powershell.exe 复制成 deepseek-balance.exe 放在状态目录：同名大小视为已就绪
+    $source = Get-SystemHostExe
+    if (-not $source) { return $false }
+    try {
+        if (Test-Path -LiteralPath $HostExePath) {
+            if ((Get-Item -LiteralPath $source).Length -eq (Get-Item -LiteralPath $HostExePath).Length) { return $true }
+        }
+        if (-not (Test-Path -LiteralPath $StateDir)) {
+            New-Item -ItemType Directory -Force -Path $StateDir | Out-Null
+        }
+        Copy-Item -LiteralPath $source -Destination $HostExePath -Force
+        Write-Log ('已准备宿主副本: ' + $HostExePath)
+        return $true
+    } catch {
+        Write-Log ('宿主副本准备失败，回退 powershell.exe: ' + $_.Exception.Message)
+        return $false
+    }
+}
+
+function Test-HostRelaunchNeeded {
+    if ($env:DEEPSEEK_BALANCE_HOST_RELAUNCH) { return $false }
+    return ((Get-CurrentHostName) -ne $HostExeName)
+}
+
+function Start-UnderRenamedHost {
+    # 以 deepseek-balance.exe 重新拉起自己，让任务管理器显示 deepseek-balance；
+    # 失败时留在当前宿主继续运行（功能不受影响，只是进程名不同）。
+    if (-not (Ensure-HostExe)) { return $false }
+    try {
+        $env:DEEPSEEK_BALANCE_HOST_RELAUNCH = '1'
+        $arguments = @('-NoProfile', '-ExecutionPolicy', 'Bypass', '-WindowStyle', 'Hidden',
+                       '-File', ('"{0}"' -f $PSCommandPath), '-Action', 'start')
+        Start-Process -FilePath $HostExePath -ArgumentList $arguments -WorkingDirectory $PSScriptRoot -WindowStyle Hidden | Out-Null
+        Write-Log ('已改用宿主 ' + $HostExeName + '.exe 重新启动挂件')
+        return $true
+    } catch {
+        Write-Log ('切换宿主失败，继续用当前宿主运行: ' + $_.Exception.Message)
+        return $false
+    }
 }
 
 # ---------------------------------------------------------------- 开机自启
@@ -189,6 +257,8 @@ switch ($Action) {
         $state = Read-WidgetState
         if ($running) {
             Write-Output ("运行中 (pid {0})" -f $running)
+            $hostName = Get-Process -Id $running -ErrorAction SilentlyContinue | Select-Object -ExpandProperty ProcessName
+            Write-Output ('宿主: ' + $(if ($hostName) { $hostName + '.exe' } else { '未知' }))
         } else {
             Write-Output '未运行'
         }
@@ -299,6 +369,11 @@ if ($existing) {
 if (-not (Test-Path -LiteralPath $BalanceScript)) {
     Write-Output ('缺少取数脚本: ' + $BalanceScript)
     exit 1
+}
+
+# 所有启动路径都统一到 deepseek-balance.exe 宿主名下（任务管理器一眼能认出）
+if (Test-HostRelaunchNeeded) {
+    if (Start-UnderRenamedHost) { exit 0 }
 }
 
 Add-Type -AssemblyName PresentationFramework
@@ -478,10 +553,18 @@ $xaml = @'
       </Viewbox>
       <Image x:Name="WhaleImage" HorizontalAlignment="Right" VerticalAlignment="Bottom"
              Width="285" Height="285" Stretch="Uniform"/>
-      <!-- 角标：取数失败/告警（红）、自愈事件（橙）、有新版本（蓝）；放在 Body 内随镜像一起翻转 -->
-      <Ellipse x:Name="NoticeBadge" Width="34" Height="34" Visibility="Collapsed"
-               HorizontalAlignment="Right" VerticalAlignment="Bottom"
-               Fill="#e0433f" Stroke="#FFFFFF" StrokeThickness="6"/>
+      <!-- 角标：彩色圆底表示严重程度（红>橙>蓝），白色矢量图标表示具体原因；放在 Body 内随镜像一起翻转 -->
+      <Grid x:Name="NoticeBadge" Width="34" Height="34" Visibility="Collapsed"
+            HorizontalAlignment="Right" VerticalAlignment="Bottom">
+        <Ellipse x:Name="NoticeBadgeDisc" Fill="#e0433f" Stroke="#FFFFFF" StrokeThickness="6"/>
+        <!-- 图标画在 24x24 坐标系里，用 Viewbox 等比缩放到圆底边长的 0.55 倍 -->
+        <Viewbox x:Name="NoticeBadgeIconBox" Width="19" Height="19"
+                 HorizontalAlignment="Center" VerticalAlignment="Center">
+          <Path x:Name="NoticeBadgeIcon" Width="24" Height="24" Stretch="None"
+                Stroke="#FFFFFF" StrokeThickness="2.1"
+                StrokeStartLineCap="Round" StrokeEndLineCap="Round" StrokeLineJoin="Round"/>
+        </Viewbox>
+      </Grid>
     </Grid>
   </Grid>
 </Window>
@@ -520,6 +603,9 @@ $textStack = $window.FindName('TextStack')
 $whaleHit = $window.FindName('WhaleHit')
 $bubbleHit = $window.FindName('BubbleHit')
 $noticeBadge = $window.FindName('NoticeBadge')
+$noticeBadgeDisc = $window.FindName('NoticeBadgeDisc')
+$noticeBadgeIconBox = $window.FindName('NoticeBadgeIconBox')
+$noticeBadgeIcon = $window.FindName('NoticeBadgeIcon')
 
 $menu = $window.FindName('WidgetMenu')
 $scaleSlider = $window.FindName('ScaleSlider')
@@ -708,11 +794,10 @@ function Stop-SoundKeepAlive {
 # 同一 Key 10 分钟内不重复弹托盘，但事件与角标照记。
 $EventsFile = Join-Path $StateDir 'events.json'
 $script:NoticeDedup = @{}
-# 角标按"来源"独立置位/清除，颜色由来源聚合（红 > 橙 > 蓝）：
-#   fetch（取数失败）/ balance（余额告警）→ 红；budget（今日预算）/ sound（音效重建）→ 橙；
-#   update（有新版本）/ peak（峰谷提示）→ 蓝
-# fetch（取数失败）/ balance（余额告警）→ 红；budget（今日预算）→ 橙；
-# update（有新版本）→ 蓝。峰谷切换只弹气泡与托盘通知，不进角标、不计入事件。
+# 角标按"来源"独立置位/清除：颜色由来源聚合（红 > 橙 > 蓝），图标表示具体原因。
+# fetch（取数失败，再按错误码分 wifi/钥匙/感叹号）/ balance（余额告警）→ 红；
+# budget（今日预算）→ 橙；update（有新版本）→ 蓝。
+# 峰谷切换只弹气泡与托盘通知，不进角标、不计入事件。
 $script:NoticeReasons = @{
     fetch   = $false
     balance = $false
@@ -723,11 +808,31 @@ $script:NoticeClearTimers = @{}
 $script:TrayIcon = $null
 $script:TrayMenu = $null
 
-function Get-NoticeLevel {
-    foreach ($reason in @('fetch', 'balance')) { if ($script:NoticeReasons[$reason]) { return 'red' } }
-    foreach ($reason in @('budget')) { if ($script:NoticeReasons[$reason]) { return 'orange' } }
-    foreach ($reason in @('update')) { if ($script:NoticeReasons[$reason]) { return 'blue' } }
-    return 'none'
+# 角标图标：24x24 坐标系，白色描边（粗细与线帽在 XAML 里定义），Viewbox 等比缩放。
+# 更新图标 = 300° 弧（缺口在右上），箭头顶点固定在弧末端，轴线在原切线基础上逆时针 25°。
+$script:BadgeIcons = @{
+    'wifi'    = 'M 3.2 9.2 A 12 12 0 0 1 20.8 9.2 M 6.6 13 A 7 7 0 0 1 17.4 13 M 9.9 16.6 A 2.8 2.8 0 0 1 14.1 16.6 M 12 19.2 V 19.3 M 3.4 20.6 L 20.6 3.4'
+    'key'     = 'M 12 2.6 A 4.5 4.5 0 1 1 12 11.6 A 4.5 4.5 0 1 1 12 2.6 M 12 11.6 V 21.2 M 12 17 H 16 M 12 20.2 H 15.2 M 3.4 20.6 L 20.6 3.4'
+    'alert'   = 'M 12 4.5 V 14.6 M 12 19 V 19.2'
+    'balance' = 'M 2.5 4.7 L 7.6 10.7 L 12.7 4.7 M 7.6 10.7 V 19.5 M 3.6 13.7 H 11.6 M 3.6 16.7 H 11.6 M 18.6 5.5 V 18.6 M 15 15.2 L 18.6 18.8 L 22.2 15.2'
+    'budget'  = 'M 2.5 4.7 L 7.6 10.7 L 12.7 4.7 M 7.6 10.7 V 19.5 M 3.6 13.7 H 11.6 M 3.6 16.7 H 11.6 M 18.6 18.6 V 5.5 M 15 8.9 L 18.6 5.3 L 22.2 8.9'
+    'update'  = 'M 18.76 13.81 A 7 7 0 1 1 16.95 7.05 M 16.95 7.05 L 14.27 3.07 M 16.95 7.05 L 12.34 8.37'
+}
+
+function Get-NoticeStyle {
+    # 返回 @{ Level = 颜色档位; Icon = 图标键名 }，Level 为 none 表示不显示角标
+    if ($script:NoticeReasons['fetch']) {
+        $icon = switch ([string]$script:FetchCode) {
+            'network' { 'wifi' }
+            'no_api_key' { 'key' }
+            default { 'alert' }
+        }
+        return @{ Level = 'red'; Icon = $icon }
+    }
+    if ($script:NoticeReasons['balance']) { return @{ Level = 'red'; Icon = 'balance' } }
+    if ($script:NoticeReasons['budget']) { return @{ Level = 'orange'; Icon = 'budget' } }
+    if ($script:NoticeReasons['update']) { return @{ Level = 'blue'; Icon = 'update' } }
+    return @{ Level = 'none'; Icon = 'none' }
 }
 
 function Update-NoticeBadge {
@@ -736,15 +841,18 @@ function Update-NoticeBadge {
         $noticeBadge.Visibility = 'Collapsed'
         return
     }
-    $level = Get-NoticeLevel
-    if ($level -eq 'none') {
+    $style = Get-NoticeStyle
+    if ($style.Level -eq 'none') {
         $noticeBadge.Visibility = 'Collapsed'
         return
     }
-    $noticeBadge.Fill = switch ($level) {
+    $noticeBadgeDisc.Fill = switch ($style.Level) {
         'red' { '#e0433f' }
         'orange' { '#f0a020' }
         default { '#3f7fe0' }
+    }
+    if ($noticeBadgeIcon -and $script:BadgeIcons.ContainsKey($style.Icon)) {
+        $noticeBadgeIcon.Data = [System.Windows.Media.Geometry]::Parse($script:BadgeIcons[$style.Icon])
     }
     $noticeBadge.Visibility = 'Visible'
 }
@@ -1982,7 +2090,10 @@ function Apply-Scale {
     $badgeSize = [Math]::Round($size * 0.11)
     $noticeBadge.Width = $badgeSize
     $noticeBadge.Height = $badgeSize
-    $noticeBadge.StrokeThickness = [Math]::Max(2, [Math]::Round($badgeSize * 0.18))
+    $noticeBadgeDisc.StrokeThickness = [Math]::Max(2, [Math]::Round($badgeSize * 0.18))
+    # 图标按圆底边长的 0.55 倍等比缩放，挂件大小变化时角标比例保持一致
+    $noticeBadgeIconBox.Width = $badgeSize * 0.55
+    $noticeBadgeIconBox.Height = $badgeSize * 0.55
     $noticeBadge.Margin = New-Object System.Windows.Thickness(0, 0, [Math]::Round($whaleSize * 0.06), [Math]::Round($whaleSize * 0.74))
 }
 
