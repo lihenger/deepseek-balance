@@ -84,6 +84,9 @@
 | 2026-09-22 | `scripts/widget.ps1`（`Reset-SoundPools` 去掉通知、`NoticeReasons` 移除 `sound` 来源、`Get-NoticeLevel`/`Get-NoticeAdvice` 同步、`Show-Bubble` 二次显示不再淡入） | 用户要求：取消音效重载事件；点击角标气泡出现后再点会闪一下 | ①音效播放器自动重建改为只写日志（保留「重载音效」菜单项与自愈逻辑），不再产生角标/事件/托盘通知，橙色角标现在只代表今日预算超支；②`Show-Bubble` 增加 `$wasOpen`：气泡已经开着时（例如连点角标在原因/解决办法之间切换）不再用 `From=0` + `BeginTime` 延迟的淡入动画——那会让已显示的气泡先变透明再淡入，看起来就是"闪一下" |
 | 2026-09-22 | 验证记录（无代码改动） | 确认本次修复 | 测试台 `DEEPSEEK_WIDGET_TEST_NOTICE2=1`（新 state dir）：调用 `Reset-SoundPools` 后日志只有 `音效播放器已重建: 模拟播放器失效`，`events.json 是否含 sound-rebuild: False`（期望 False）；连点两次角标建议气泡，第二次显示后 `不透明度=1`（不再被打回 0），气泡内容在原因/解决办法间正常切换 |
 | 2026-09-22 | `README.md`、`docs/接口文档.md` | 同步本次修复 | README 角标颜色说明改为「橙=今日预算超支」并注明音效重建只写日志；接口文档去掉 `sound` 角标来源与 10 分钟自清说明 |
+| 2026-09-22 | `scripts/widget.ps1`（`Show-Notice` 新增 `-NoRecord`、峰谷两处通知改用该参数、`NoticeReasons`/`Get-NoticeLevel`/`Get-NoticeAdvice` 去掉 `peak`） | 用户要求「峰谷切换不加入角标」（前一版是"不计入事件"） | 峰谷切换与峰谷预告只弹峰谷气泡 + 托盘通知，参数改为 `-NoRecord`：不写 `events.json`、不点亮角标、不进「最近事件」、点角标也不会出现峰谷建议（`peak` 来源整体移除）；提醒本身与「峰谷切换提醒」开关不变 |
+| 2026-09-22 | 验证记录（无代码改动） | 确认本次调整 | 测试台 `DEEPSEEK_WIDGET_TEST_PEAK=1`（注入"20 秒后切换"与"刚切换"）：日志出现 `通知[blue/peak-pre:...] 1 分钟后进入高峰价` 与 `通知[blue/peak-switch:...] 已进入高峰价`，两次之后 `角标=none`（不再点亮），`events.json 是否含 peak-* 事件: False`（期望 False），峰谷气泡仍按原逻辑弹出 |
+| 2026-09-22 | `README.md`、`docs/接口文档.md` | 同步本次调整 | README 的角标颜色与事件范围改为「红=取数失败/余额告警、橙=今日预算超支、蓝=有新版本」，并注明峰谷切换与音效重建都不进角标与事件；接口文档去掉 `peak` 角标来源并说明 `-NoRecord` |
 
 ## 未纳入本次改动
 

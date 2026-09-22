@@ -711,13 +711,12 @@ $script:NoticeDedup = @{}
 #   fetch（取数失败）/ balance（余额告警）→ 红；budget（今日预算）/ sound（音效重建）→ 橙；
 #   update（有新版本）/ peak（峰谷提示）→ 蓝
 # fetch（取数失败）/ balance（余额告警）→ 红；budget（今日预算）→ 橙；
-# update（有新版本）/ peak（峰谷提示）→ 蓝
+# update（有新版本）→ 蓝。峰谷切换只弹气泡与托盘通知，不进角标、不计入事件。
 $script:NoticeReasons = @{
     fetch   = $false
     balance = $false
     budget  = $false
     update  = $false
-    peak    = $false
 }
 $script:NoticeClearTimers = @{}
 $script:TrayIcon = $null
@@ -726,7 +725,7 @@ $script:TrayMenu = $null
 function Get-NoticeLevel {
     foreach ($reason in @('fetch', 'balance')) { if ($script:NoticeReasons[$reason]) { return 'red' } }
     foreach ($reason in @('budget')) { if ($script:NoticeReasons[$reason]) { return 'orange' } }
-    foreach ($reason in @('update', 'peak')) { if ($script:NoticeReasons[$reason]) { return 'blue' } }
+    foreach ($reason in @('update')) { if ($script:NoticeReasons[$reason]) { return 'blue' } }
     return 'none'
 }
 
@@ -804,9 +803,11 @@ function Show-Notice {
         [string]$Text = '',
         [string]$Reason = '',
         [int]$TtlSeconds = 0,
-        [switch]$Silent
+        [switch]$Silent,
+        [switch]$NoRecord
     )
-    Add-NoticeEvent -Level $Level -Key $Key -Title $Title -Text $Text
+    # -NoRecord：只提示不记账（例如峰谷切换不计入事件与角标）
+    if (-not $NoRecord) { Add-NoticeEvent -Level $Level -Key $Key -Title $Title -Text $Text }
     Write-Log ('通知[{0}/{1}] {2} {3}' -f $Level, $Key, $Title, $Text)
     if ($Silent) { return }
     if ($Reason) { Set-NoticeReason -Reason $Reason -On $true -TtlSeconds $TtlSeconds }
@@ -950,7 +951,7 @@ function Test-PeakNotice {
         if ($script:LastPeakNoticeKey -eq $key) { return }
         $script:LastPeakNoticeKey = $key
         Show-Notice -Level 'blue' -Key $key -Title ('已进入' + $toLabel) -Text ('现在起按' + $toLabel + '计费') `
-            -Reason 'peak' -TtlSeconds 60
+            -NoRecord
         Show-PeakBubble -IsPeak ([bool]$info.nextIsPeak)
         return
     }
@@ -960,7 +961,7 @@ function Test-PeakNotice {
         $script:LastPeakPreKey = $preKey
         $minutes = [Math]::Max(1, [Math]::Round($seconds / 60))
         Show-Notice -Level 'blue' -Key $preKey -Title ('{0} 分钟后进入{1}' -f $minutes, $toLabel) `
-            -Text ('当前为{0}，可以安排跑量' -f $fromLabel) -Reason 'peak' -TtlSeconds 60
+            -Text ('当前为{0}，可以安排跑量' -f $fromLabel) -NoRecord
     }
 }
 
@@ -1083,9 +1084,6 @@ function Get-NoticeAdvice {
             reason   = ('有新版本 {0} → {1}' -f $local, $remote)
             solution = '托盘菜单点「有新版本」打开仓库查看'
         }
-    }
-    if ($script:NoticeReasons['peak']) {
-        return @{ reason = '峰谷切换提示'; solution = '谷价时段适合跑量；可关掉「峰谷切换提醒」' }
     }
     return @{ reason = '没有待处理的事件'; solution = '一切正常，无需处理' }
 }
