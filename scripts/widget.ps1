@@ -1065,20 +1065,20 @@ function Get-NoticeAdvice {
         switch ([string]$script:FetchCode) {
             'network' {
                 return @{
-                    reason   = '呜...网络好像断啦，我查不到余额了...'
-                    solution = '要检查下网络吗？恢复了我自己就会安静下来~'
+                    reason   = '呜...网络断啦，查不到余额...'
+                    solution = '检查下网络就行~'
                 }
             }
             'no_api_key' {
                 return @{
-                    reason   = '呜...我找不到钥匙（密钥）了...'
-                    solution = '去 config.toml 或环境变量里给我配一把吧~'
+                    reason   = '呜...我找不到密钥了...'
+                    solution = '给我配一把密钥吧~'
                 }
             }
             default {
                 return @{
-                    reason   = '呜...我查余额的时候出错了...'
-                    solution = '点我刷新一次试试？还不行就看下 widget.log~'
+                    reason   = '呜...查余额出错了...'
+                    solution = '刷新一下试试~'
                 }
             }
         }
@@ -1086,26 +1086,26 @@ function Get-NoticeAdvice {
     if ($script:NoticeReasons['balance']) {
         $balance = if ($null -ne $script:ShownBalance) { [double]$script:ShownBalance } else { 0.0 }
         return @{
-            reason   = ('我...我的余额只剩 ¥{0:N2} 啦...（告警线 ¥{1:N2}）' -f $balance, [double]$script:Cfg.balanceAlert)
-            solution = '要充一点点钱吗？或者把告警线调低一点点...'
+            reason   = ('余额只剩 ¥{0:N2} 啦...' -f $balance)
+            solution = ('充点钱，或调低 ¥{0:N2} 告警线~' -f [double]$script:Cfg.balanceAlert)
         }
     }
     if ($script:NoticeReasons['budget']) {
         $today = if ($null -ne $script:TodayUsage) { [double]$script:TodayUsage } else { 0.0 }
         return @{
-            reason   = ('今天已经花掉 ¥{0:N2} 啦...超过预算 ¥{1:N2} 了...' -f $today, [double]$script:Cfg.dailyBudget)
-            solution = '要把预算调高一点，还是先关掉它呀？'
+            reason   = ('今天花了 ¥{0:N2}，超预算啦...' -f $today)
+            solution = ('调高 ¥{0:N2} 预算，或先关掉~' -f [double]$script:Cfg.dailyBudget)
         }
     }
     if ($script:NoticeReasons['update']) {
         $local = if ($script:UpdateInfo) { $script:UpdateInfo.local } else { '?' }
         $remote = if ($script:UpdateInfo) { $script:UpdateInfo.remote } else { '?' }
         return @{
-            reason   = ('有新版本可以换啦...{0} → {1}~' -f $local, $remote)
-            solution = '托盘菜单里点「有新版本」，我带你去看看？'
+            reason   = ('新版本来啦 {0} → {1}...' -f $local, $remote)
+            solution = '托盘菜单点「有新版本」~'
         }
     }
-    return @{ reason = '哦鲸鲸...现在没什么要操心的~'; solution = '我继续盯着余额啦，你去忙吧~' }
+    return @{ reason = '哦鲸鲸...现在没什么事...'; solution = '我继续盯余额啦~' }
 }
 
 function Show-NoticeAdviceBubble {
@@ -1114,17 +1114,17 @@ function Show-NoticeAdviceBubble {
     if ($script:BadgeView -eq 'reason') {
         $script:BadgeView = 'solution'
         $body = [string]$advice.reason
-        $hint = '再点一下，我小声给你出主意~'
+        $hint = '再点一下，有建议~'
     } else {
         $script:BadgeView = 'reason'
         $body = [string]$advice.solution
-        $hint = '再点一下，回去看怎么回事~'
+        $hint = '再点一下，看原因~'
     }
     $script:RandomActive = $false
     $script:RandomLines = $null
     Write-Log ('角标建议: ' + $body + ' / ' + $hint)
     Show-Bubble -Lines @(
-        @{ t = $body; s = 'C'; c = '#536ba9'; w = $true },
+        @{ t = $body; s = 'M'; c = ''; w = $true },
         @{ t = $hint; s = 'S'; c = ''; w = $false }
     )
 }
@@ -1558,8 +1558,9 @@ function Set-LineStyle {
     switch ($Style) {
         'B' { $Block.FontSize = 128; $Block.FontWeight = 'Bold'; $Block.Foreground = '#536ba9'; $Block.Width = [double]::NaN }
         'P' { $Block.FontSize = 104; $Block.FontWeight = 'Bold'; $Block.Foreground = '#536ba9'; $Block.Width = [double]::NaN }
+        'M' { $Block.FontSize = 56; $Block.FontWeight = 'Bold'; $Block.Foreground = '#536ba9'; $Block.Width = [double]::NaN }
         'C' { $Block.FontSize = 56; $Block.FontWeight = 'Normal'; $Block.Foreground = '#9fb0d9'; $Block.Width = [double]::NaN }
-        'S' { $Block.FontSize = 40; $Block.FontWeight = 'Normal'; $Block.Foreground = '#9fb0d9'; $Block.Width = [double]::NaN }
+        'S' { $Block.FontSize = 40; $Block.FontWeight = 'SemiBold'; $Block.Foreground = '#9fb0d9'; $Block.Width = [double]::NaN }
         default { $Block.FontSize = 66; $Block.FontWeight = 'SemiBold'; $Block.Foreground = '#536ba9'; $Block.Width = [double]::NaN }
     }
     # 行高必须跟着字号走：固定行高（原来的 134）配 66 号字的换行文案会撑高一大截，
