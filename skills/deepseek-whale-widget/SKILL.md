@@ -25,7 +25,7 @@ powershell -NoProfile -ExecutionPolicy Bypass -File <plugin>/scripts/widget.ps1 
 | `spawn` | **后台启动**（推荐，从对话里用它）：用 WMI 创建进程，脱离调用方进程树与沙箱令牌，命令立即返回 |
 | `start` | 前台启动并阻塞到窗口关闭；已在运行则只提示，不会开出第二个 |
 | `stop` | 结束挂件进程并清理 pid 文件 |
-| `status` | 输出运行状态、pid、是否开机自启、当前缩放与模式 |
+| `status` | 输出运行状态、pid、宿主可执行文件名、是否开机自启、当前缩放与模式 |
 | `autostart-on` / `autostart-off` | 在「启动」目录创建/删除快捷方式 |
 
 ## 注意事项
@@ -35,3 +35,4 @@ powershell -NoProfile -ExecutionPolicy Bypass -File <plugin>/scripts/widget.ps1 
 - 挂件默认**不开机自启**；未设自启时每次开机都需要通过对话或双击 `widget-launch.vbs` 打开。
 - 挂件的数据来自同插件的 `scripts/balance.mjs`，因此它每 60 秒观测一次余额，账本会持续累积，`todayUsage` 比只靠问答触发更准。
 - 排障看状态目录里的 `widget.log`（默认 `%USERPROFILE%\.codex\deepseek-balance\widget.log`），配置在同目录 `widget.json`。
+- 任务管理器里挂件显示为 **deepseek-balance**：首次启动会把系统 `powershell.exe` 复制成状态目录下的 `deepseek-balance.exe` 并以它重新拉起（`-Action status` 的「宿主」行能看到实际宿主），复制失败时回退 `powershell.exe`，不影响功能。
