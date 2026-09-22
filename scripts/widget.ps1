@@ -401,10 +401,7 @@ $xaml = @'
         <MenuItem x:Name="PeakNoticeItem" Header="峰谷切换提醒" IsCheckable="True" IsChecked="True"/>
       </MenuItem>
       <MenuItem x:Name="RecentEventsItem" Header="最近事件"/>
-      <MenuItem x:Name="UpdateItem" Header="有新版本" Visibility="Collapsed"/>
       <Separator/>
-      <MenuItem x:Name="UpdateCheckItem" Header="自动检查更新" IsCheckable="True" IsChecked="True"/>
-      <MenuItem x:Name="AutostartItem" Header="开机自启" IsCheckable="True"/>
       <MenuItem x:Name="BubbleItem" Header="气泡" IsCheckable="True" IsChecked="True"/>
       <Separator/>
       <MenuItem x:Name="CloseWindowItem" Header="关闭悬浮窗"/>
@@ -518,11 +515,8 @@ $budgetAlertItem = $window.FindName('BudgetAlertItem')
 $budgetValue = $window.FindName('BudgetValue')
 $peakNoticeItem = $window.FindName('PeakNoticeItem')
 $recentEventsItem = $window.FindName('RecentEventsItem')
-$updateItem = $window.FindName('UpdateItem')
-$updateCheckItem = $window.FindName('UpdateCheckItem')
 $bubbleItem = $window.FindName('BubbleItem')
 $closeWindowItem = $window.FindName('CloseWindowItem')
-$autostartItem = $window.FindName('AutostartItem')
 $refreshItem = $window.FindName('RefreshItem')
 
 if (Test-Path -LiteralPath $WhalePng) {
@@ -839,18 +833,45 @@ function Initialize-TrayIcon {
         }
         $icon.Text = 'DeepSeek 余额挂件'
         $menu = New-Object System.Windows.Forms.ContextMenuStrip
-        # 托盘菜单只保留两件事：悬浮窗显示/关闭（按状态切换文案）+ 退出
+        # 托盘菜单：显示/关闭悬浮窗（按状态切换文案）+ 开机自启 + 自动检查更新 +（有新版本）+ 退出
         $script:TrayItemToggleWindow = $menu.Items.Add('关闭悬浮窗')
+        [void]$menu.Items.Add((New-Object System.Windows.Forms.ToolStripSeparator))
+        $script:TrayItemAutostart = $menu.Items.Add('开机自启')
+        $script:TrayItemAutostart.CheckOnClick = $true
+        $script:TrayItemAutostart.Checked = Test-Path -LiteralPath $ShortcutPath
+        $script:TrayItemUpdateCheck = $menu.Items.Add('自动检查更新')
+        $script:TrayItemUpdateCheck.CheckOnClick = $true
+        $script:TrayItemUpdateCheck.Checked = [bool]$script:Cfg.updateCheck
+        $script:TrayItemUpdate = $menu.Items.Add('有新版本')
+        $script:TrayItemUpdate.Visible = $false
+        [void]$menu.Items.Add((New-Object System.Windows.Forms.ToolStripSeparator))
         $script:TrayItemExit = $menu.Items.Add('退出')
 
         $script:TrayItemToggleWindow.Add_Click({
             if ($window.IsVisible) { Hide-FloatingWindow } else { Show-FloatingWindow }
         })
+        $script:TrayItemAutostart.Add_Click({
+            [void](Set-AutostartFromMenu -Enabled ([bool]$script:TrayItemAutostart.Checked))
+        })
+        $script:TrayItemUpdateCheck.Add_Click({
+            [void](Set-UpdateCheckEnabled -Enabled ([bool]$script:TrayItemUpdateCheck.Checked))
+        })
+        $script:TrayItemUpdate.Add_Click({
+            [void](Open-UpdatePage)
+        })
         $script:TrayItemExit.Add_Click({ $window.Close() })
-        # 每次弹出菜单前刷新切换项文案
+        # 每次弹出菜单前刷新切换文案与勾选状态
         $menu.Add_Opening({
             if (-not $script:TrayItemToggleWindow) { return }
             $script:TrayItemToggleWindow.Text = if ($window.IsVisible) { '关闭悬浮窗' } else { '显示悬浮窗' }
+            $script:TrayItemAutostart.Checked = Test-Path -LiteralPath $ShortcutPath
+            $script:TrayItemUpdateCheck.Checked = [bool]$script:Cfg.updateCheck
+            if ($script:UpdateInfo) {
+                $script:TrayItemUpdate.Text = ('有新版本 {0} → {1}' -f $script:UpdateInfo.local, $script:UpdateInfo.remote)
+                $script:TrayItemUpdate.Visible = $true
+            } else {
+                $script:TrayItemUpdate.Visible = $false
+            }
         })
         # 托盘左键单击 = 显示并前置悬浮窗（右键仍由 ContextMenuStrip 处理）
         $icon.add_MouseClick({
@@ -1036,7 +1057,7 @@ function Get-NoticeAdvice {
         $remote = if ($script:UpdateInfo) { $script:UpdateInfo.remote } else { '?' }
         return @{
             reason   = ('有新版本 {0} → {1}' -f $local, $remote)
-            solution = '右键菜单点「有新版本」打开仓库查看'
+            solution = '托盘菜单点「有新版本」打开仓库查看'
         }
     }
     if ($script:NoticeReasons['peak']) {
@@ -1166,7 +1187,7 @@ function Test-PluginUpdate {
     }
     if ($remoteSha -eq $localSha) {
         Set-NoticeReason -Reason 'update' -On $false
-        if ($updateItem) { $updateItem.Visibility = 'Collapsed' }
+        if ($script:TrayItemUpdate) { $script:TrayItemUpdate.Visible = $false }
         $script:UpdateInfo = $null
         Write-Log ('更新检查：已是最新（' + $localSha.Substring(0, 7) + '）')
         return
@@ -1176,17 +1197,52 @@ function Test-PluginUpdate {
         local  = $localSha.Substring(0, 7)
         remote = $remoteSha.Substring(0, 7)
     }
-    if ($updateItem) {
-        $updateItem.Header = ('有新版本 {0} → {1}' -f $script:UpdateInfo.local, $script:UpdateInfo.remote)
-        $updateItem.Visibility = 'Visible'
+    if ($script:TrayItemUpdate) {
+        $script:TrayItemUpdate.Text = ('有新版本 {0} → {1}' -f $script:UpdateInfo.local, $script:UpdateInfo.remote)
+        $script:TrayItemUpdate.Visible = $true
     }
     if ($script:LastUpdateNoticeSha -ne $remoteSha) {
         $script:LastUpdateNoticeSha = $remoteSha
         Show-Notice -Level 'blue' -Key 'update' -Title '有新版本' `
-            -Text ('本地 {0}，远端 {1}，右键菜单可打开仓库' -f $script:UpdateInfo.local, $script:UpdateInfo.remote) `
+            -Text ('本地 {0}，远端 {1}，托盘菜单可打开仓库' -f $script:UpdateInfo.local, $script:UpdateInfo.remote) `
             -Reason 'update'
     }
     Write-Log ('更新检查：发现新版本 本地 {0} / 远端 {1}' -f $script:UpdateInfo.local, $script:UpdateInfo.remote)
+}
+
+function Set-AutostartFromMenu {
+    # 托盘「开机自启」：开关逻辑抽出来，便于测试台直接覆盖
+    param([bool]$Enabled)
+    try {
+        if ($Enabled) { Enable-Autostart } else { $null = Disable-Autostart }
+    } catch {
+        Write-Log ('自启设置失败: ' + $_.Exception.Message)
+    }
+    $exists = Test-Path -LiteralPath $ShortcutPath
+    if ($script:TrayItemAutostart) { $script:TrayItemAutostart.Checked = $exists }
+    return $exists
+}
+
+function Set-UpdateCheckEnabled {
+    # 托盘「自动检查更新」：写配置并立即查一次（关闭时清掉蓝色角标）
+    param([bool]$Enabled)
+    $script:Cfg.updateCheck = $Enabled
+    Save-WidgetState $script:Cfg
+    if ($script:TrayItemUpdateCheck) { $script:TrayItemUpdateCheck.Checked = $Enabled }
+    if ($Enabled) { Test-PluginUpdate } else { Set-NoticeReason -Reason 'update' -On $false }
+    return $Enabled
+}
+
+function Open-UpdatePage {
+    # 托盘「有新版本」：打开仓库页并收起蓝色角标
+    if (-not $script:UpdateInfo) { return $false }
+    try { Start-Process -FilePath $script:UpdateInfo.url } catch { }
+    Set-NoticeReason -Reason 'update' -On $false
+    if ($script:TrayItemUpdate) {
+        $script:TrayItemUpdate.Text = '有新版本'
+        $script:TrayItemUpdate.Visible = $false
+    }
+    return $true
 }
 
 function Start-UpdateCheckTimer {
@@ -1257,9 +1313,7 @@ function Sync-Menu {
     $balanceAlertValue.Header = ('余额告警阈值…（当前 {0}）' -f (Format-ThresholdText ([double]$script:Cfg.balanceAlert)))
     $budgetValue.Header = ('今日预算阈值…（当前 {0}）' -f (Format-ThresholdText ([double]$script:Cfg.dailyBudget)))
     $peakNoticeItem.IsChecked = [bool]$script:Cfg.peakNotice
-    $updateCheckItem.IsChecked = [bool]$script:Cfg.updateCheck
     $bubbleItem.IsChecked = [bool]$script:Cfg.bubbleOn
-    $autostartItem.IsChecked = (Test-Path -LiteralPath $ShortcutPath)
     Update-RecentEventsMenu
     $script:SyncingMenu = $false
 }
@@ -2148,20 +2202,6 @@ $peakNoticeItem.Add_Click({
 $balanceAlertValue.Add_Click({ Show-ThresholdDialog -Kind 'balance' })
 $budgetValue.Add_Click({ Show-ThresholdDialog -Kind 'budget' })
 
-$updateCheckItem.Add_Click({
-    $script:Cfg.updateCheck = [bool]$updateCheckItem.IsChecked
-    Save-WidgetState $script:Cfg
-    if ($script:Cfg.updateCheck) { Test-PluginUpdate }
-})
-
-$updateItem.Add_Click({
-    if ($script:UpdateInfo) {
-        try { Start-Process -FilePath $script:UpdateInfo.url } catch { }
-        # 已经带用户去看仓库了，蓝色角标的使命结束
-        Set-NoticeReason -Reason 'update' -On $false
-    }
-})
-
 $bubbleItem.Add_Click({
     $script:Cfg.bubbleOn = [bool]$bubbleItem.IsChecked
     if (-not $script:Cfg.bubbleOn) { Hide-Bubble }
@@ -2170,15 +2210,6 @@ $bubbleItem.Add_Click({
 
 $closeWindowItem.Add_Click({
     Hide-FloatingWindow
-})
-
-$autostartItem.Add_Click({
-    try {
-        if ($autostartItem.IsChecked) { Enable-Autostart } else { $null = Disable-Autostart }
-    } catch {
-        Write-Log ('自启设置失败: ' + $_.Exception.Message)
-    }
-    $autostartItem.IsChecked = (Test-Path -LiteralPath $ShortcutPath)
 })
 
 $refreshItem.Add_Click({
