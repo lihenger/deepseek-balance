@@ -616,8 +616,6 @@ function Reset-SoundPools {
     $script:SoundStale = $false
     if ($Reason) {
         Write-Log ('音效播放器已重建: ' + $Reason)
-        Show-Notice -Level 'orange' -Key 'sound-rebuild' -Title '音效播放器已重建' -Text $Reason `
-            -Reason 'sound' -TtlSeconds $script:SoundBadgeTtlSeconds
     }
 }
 
@@ -712,22 +710,22 @@ $script:NoticeDedup = @{}
 # 角标按"来源"独立置位/清除，颜色由来源聚合（红 > 橙 > 蓝）：
 #   fetch（取数失败）/ balance（余额告警）→ 红；budget（今日预算）/ sound（音效重建）→ 橙；
 #   update（有新版本）/ peak（峰谷提示）→ 蓝
+# fetch（取数失败）/ balance（余额告警）→ 红；budget（今日预算）→ 橙；
+# update（有新版本）/ peak（峰谷提示）→ 蓝
 $script:NoticeReasons = @{
     fetch   = $false
     balance = $false
     budget  = $false
-    sound   = $false
     update  = $false
     peak    = $false
 }
-$script:SoundBadgeTtlSeconds = 600
 $script:NoticeClearTimers = @{}
 $script:TrayIcon = $null
 $script:TrayMenu = $null
 
 function Get-NoticeLevel {
     foreach ($reason in @('fetch', 'balance')) { if ($script:NoticeReasons[$reason]) { return 'red' } }
-    foreach ($reason in @('budget', 'sound')) { if ($script:NoticeReasons[$reason]) { return 'orange' } }
+    foreach ($reason in @('budget')) { if ($script:NoticeReasons[$reason]) { return 'orange' } }
     foreach ($reason in @('update', 'peak')) { if ($script:NoticeReasons[$reason]) { return 'blue' } }
     return 'none'
 }
@@ -1077,9 +1075,6 @@ function Get-NoticeAdvice {
             reason   = ('今日 ¥{0:N2} ≥ 预算 ¥{1:N2}' -f $today, [double]$script:Cfg.dailyBudget)
             solution = '调高今日预算阈值，或在「告警」里关掉它'
         }
-    }
-    if ($script:NoticeReasons['sound']) {
-        return @{ reason = '音效播放器已重建'; solution = '不用处理；仍无声可点「音效集 → 重载音效」' }
     }
     if ($script:NoticeReasons['update']) {
         $local = if ($script:UpdateInfo) { $script:UpdateInfo.local } else { '?' }
@@ -1712,16 +1707,24 @@ function New-FadeAnimation {
 function Show-Bubble {
     param($Lines = $null)
     if (-not $script:Cfg.bubbleOn) { return }
+    $wasOpen = $script:BubbleOpen
     if ($Lines) { Apply-Lines -Lines $Lines } else { Set-DefaultLines }
     $script:BubbleOpen = $true
     # 气泡出现后，气泡那片区域才纳入命中范围
     $bubbleHit.Visibility = 'Visible'
-    $bubbleShape.BeginAnimation([System.Windows.UIElement]::OpacityProperty, (New-FadeAnimation 1 0 0.18 0.26))
-    $bubbleB1.BeginAnimation([System.Windows.UIElement]::OpacityProperty, (New-FadeAnimation 1 0 0.18 0.13))
-    $bubbleB2.BeginAnimation([System.Windows.UIElement]::OpacityProperty, (New-FadeAnimation 1 0 0.18 0))
-    $textGroup.BeginAnimation([System.Windows.UIElement]::OpacityProperty, (New-FadeAnimation 1 0 0.16 0.36))
-    $bubbleScale.BeginAnimation([System.Windows.Media.ScaleTransform]::ScaleXProperty, (New-FadeAnimation 1 0.94 0.2 0))
-    $bubbleScale.BeginAnimation([System.Windows.Media.ScaleTransform]::ScaleYProperty, (New-FadeAnimation 1 0.94 0.2 0))
+    # 气泡已经开着时（例如连点角标切换原因/解决办法）不要再淡入：
+    # From=0 + BeginTime 延迟会让已经显示的气泡先变透明，看起来就是"闪一下"。
+    $fadeFrom = if ($wasOpen) { 1.0 } else { 0.0 }
+    $tShape = if ($wasOpen) { 0.0 } else { 0.26 }
+    $tB1 = if ($wasOpen) { 0.0 } else { 0.13 }
+    $tText = if ($wasOpen) { 0.0 } else { 0.36 }
+    $scaleFrom = if ($wasOpen) { 1.0 } else { 0.94 }
+    $bubbleShape.BeginAnimation([System.Windows.UIElement]::OpacityProperty, (New-FadeAnimation 1 $fadeFrom 0.18 $tShape))
+    $bubbleB1.BeginAnimation([System.Windows.UIElement]::OpacityProperty, (New-FadeAnimation 1 $fadeFrom 0.18 $tB1))
+    $bubbleB2.BeginAnimation([System.Windows.UIElement]::OpacityProperty, (New-FadeAnimation 1 $fadeFrom 0.18 0))
+    $textGroup.BeginAnimation([System.Windows.UIElement]::OpacityProperty, (New-FadeAnimation 1 $fadeFrom 0.16 $tText))
+    $bubbleScale.BeginAnimation([System.Windows.Media.ScaleTransform]::ScaleXProperty, (New-FadeAnimation 1 $scaleFrom 0.2 0))
+    $bubbleScale.BeginAnimation([System.Windows.Media.ScaleTransform]::ScaleYProperty, (New-FadeAnimation 1 $scaleFrom 0.2 0))
     if ($script:BubbleTimer) { $script:BubbleTimer.Stop() }
     $script:BubbleTimer = New-Object System.Windows.Threading.DispatcherTimer
     $script:BubbleTimer.Interval = [TimeSpan]::FromSeconds(5)
