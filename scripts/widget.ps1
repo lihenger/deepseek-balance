@@ -81,6 +81,8 @@ function Get-DefaultState {
         usageMode = 'ledger'
         peakMode  = 'default'
         bubbleOn  = $true
+        bubbleScale = 1.0
+        badgeOn   = $true
         trayNotify = $true
         balanceAlert = 5
         balanceAlertOn = $true
@@ -109,6 +111,8 @@ function Read-WidgetState {
     if ($state.scale -gt 2.5) { $state.scale = 2.5 }
     if ($state.volume -lt 0) { $state.volume = 0 }
     if ($state.volume -gt 1) { $state.volume = 1 }
+    if ($state.bubbleScale -lt 0.5) { $state.bubbleScale = 0.5 }
+    if ($state.bubbleScale -gt 1.5) { $state.bubbleScale = 1.5 }
     if ($state.soundSet -ne 'fx1') { $state.soundSet = 'duck' }
     if ($state.usageMode -ne 'token') { $state.usageMode = 'ledger' }
     if (@('default', 'liangwen', 'qiangqiang') -notcontains $state.peakMode) { $state.peakMode = 'default' }
@@ -350,6 +354,8 @@ $script:UpdateInfo = $null
 $script:LastUpdateNoticeSha = $null
 $script:UpdateTimer = $null
 $script:BadgeView = 'reason'
+$script:WinW = $null
+$script:WinH = $null
 
 $xaml = @'
 <Window xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
@@ -364,15 +370,32 @@ $xaml = @'
       <Separator/>
       <MenuItem>
         <MenuItem.Header>
-          <Slider x:Name="ScaleSlider" Width="170" Minimum="0.6" Maximum="2.5" Value="1.5"
-                  TickFrequency="0.1" IsSnapToTickEnabled="True"/>
+          <StackPanel Orientation="Horizontal">
+            <TextBlock Text="挂件大小" VerticalAlignment="Center" Margin="0,0,8,0"/>
+            <Slider x:Name="ScaleSlider" Width="150" Minimum="0.6" Maximum="2.5" Value="1.5"
+                    TickFrequency="0.1" IsSnapToTickEnabled="True"/>
+          </StackPanel>
+        </MenuItem.Header>
+      </MenuItem>
+      <Separator/>
+      <MenuItem x:Name="BubbleItem" Header="气泡" IsCheckable="True" IsChecked="True"/>
+      <MenuItem>
+        <MenuItem.Header>
+          <StackPanel Orientation="Horizontal">
+            <TextBlock Text="气泡大小" VerticalAlignment="Center" Margin="0,0,8,0"/>
+            <Slider x:Name="BubbleScaleSlider" Width="150" Minimum="0.5" Maximum="1.5" Value="1"
+                    TickFrequency="0.05" IsSnapToTickEnabled="True"/>
+          </StackPanel>
         </MenuItem.Header>
       </MenuItem>
       <Separator/>
       <MenuItem x:Name="SoundItem" Header="音效" IsCheckable="True" IsChecked="True"/>
       <MenuItem>
         <MenuItem.Header>
-          <Slider x:Name="VolumeSlider" Width="170" Minimum="0" Maximum="1" Value="0.6"/>
+          <StackPanel Orientation="Horizontal">
+            <TextBlock Text="音量" VerticalAlignment="Center" Margin="0,0,8,0"/>
+            <Slider x:Name="VolumeSlider" Width="150" Minimum="0" Maximum="1" Value="0.6"/>
+          </StackPanel>
         </MenuItem.Header>
       </MenuItem>
       <MenuItem Header="音效集">
@@ -382,27 +405,27 @@ $xaml = @'
         <MenuItem x:Name="SoundReload" Header="重载音效"/>
       </MenuItem>
       <Separator/>
-      <MenuItem Header="用量">
+      <MenuItem Header="用量与告警">
         <MenuItem x:Name="ModeLedger" Header="小鲸鱼记账 (推荐)" IsCheckable="True" IsChecked="True"/>
         <MenuItem x:Name="ModeToken" Header="实时·令牌" IsCheckable="True"/>
-      </MenuItem>
-      <MenuItem Header="峰谷文案">
-        <MenuItem x:Name="PeakDefault" Header="默认" IsCheckable="True" IsChecked="True"/>
-        <MenuItem x:Name="PeakLiangwen" Header="梁文峰谷" IsCheckable="True"/>
-        <MenuItem x:Name="PeakQiangqiang" Header="!?强强?!" IsCheckable="True"/>
-      </MenuItem>
-      <MenuItem Header="告警">
+        <Separator/>
         <MenuItem x:Name="BalanceAlertItem" Header="余额告警" IsCheckable="True" IsChecked="True"/>
         <MenuItem x:Name="BalanceAlertValue" Header="余额告警阈值…"/>
-        <Separator/>
         <MenuItem x:Name="BudgetAlertItem" Header="今日预算" IsCheckable="True"/>
         <MenuItem x:Name="BudgetValue" Header="今日预算阈值…"/>
-        <Separator/>
-        <MenuItem x:Name="PeakNoticeItem" Header="峰谷切换提醒" IsCheckable="True" IsChecked="True"/>
       </MenuItem>
-      <MenuItem x:Name="RecentEventsItem" Header="最近事件"/>
+      <MenuItem Header="峰谷">
+        <MenuItem x:Name="PeakNoticeItem" Header="峰谷切换提醒" IsCheckable="True" IsChecked="True"/>
+        <Separator/>
+        <MenuItem Header="文案">
+          <MenuItem x:Name="PeakDefault" Header="默认" IsCheckable="True" IsChecked="True"/>
+          <MenuItem x:Name="PeakLiangwen" Header="梁文峰谷" IsCheckable="True"/>
+          <MenuItem x:Name="PeakQiangqiang" Header="!?强强?!" IsCheckable="True"/>
+        </MenuItem>
+      </MenuItem>
       <Separator/>
-      <MenuItem x:Name="BubbleItem" Header="气泡" IsCheckable="True" IsChecked="True"/>
+      <MenuItem x:Name="BadgeItem" Header="角标" IsCheckable="True" IsChecked="True"/>
+      <MenuItem x:Name="RecentEventsItem" Header="最近事件"/>
       <Separator/>
       <MenuItem x:Name="CloseWindowItem" Header="关闭悬浮窗"/>
     </ContextMenu>
@@ -499,6 +522,7 @@ $noticeBadge = $window.FindName('NoticeBadge')
 
 $menu = $window.FindName('WidgetMenu')
 $scaleSlider = $window.FindName('ScaleSlider')
+$bubbleScaleSlider = $window.FindName('BubbleScaleSlider')
 $volumeSlider = $window.FindName('VolumeSlider')
 $soundItem = $window.FindName('SoundItem')
 $soundDuck = $window.FindName('SoundDuck')
@@ -516,6 +540,7 @@ $budgetValue = $window.FindName('BudgetValue')
 $peakNoticeItem = $window.FindName('PeakNoticeItem')
 $recentEventsItem = $window.FindName('RecentEventsItem')
 $bubbleItem = $window.FindName('BubbleItem')
+$badgeItem = $window.FindName('BadgeItem')
 $closeWindowItem = $window.FindName('CloseWindowItem')
 $refreshItem = $window.FindName('RefreshItem')
 
@@ -709,6 +734,10 @@ function Get-NoticeLevel {
 
 function Update-NoticeBadge {
     if (-not $noticeBadge) { return }
+    if (-not $script:Cfg.badgeOn) {
+        $noticeBadge.Visibility = 'Collapsed'
+        return
+    }
     $level = Get-NoticeLevel
     if ($level -eq 'none') {
         $noticeBadge.Visibility = 'Collapsed'
@@ -1299,6 +1328,7 @@ function Update-RecentEventsMenu {
 function Sync-Menu {
     $script:SyncingMenu = $true
     $scaleSlider.Value = $script:Cfg.scale
+    $bubbleScaleSlider.Value = $script:Cfg.bubbleScale
     $volumeSlider.Value = $script:Cfg.volume
     $soundItem.IsChecked = [bool]$script:Cfg.sound
     $soundDuck.IsChecked = ($script:Cfg.soundSet -eq 'duck')
@@ -1314,6 +1344,7 @@ function Sync-Menu {
     $budgetValue.Header = ('今日预算阈值…（当前 {0}）' -f (Format-ThresholdText ([double]$script:Cfg.dailyBudget)))
     $peakNoticeItem.IsChecked = [bool]$script:Cfg.peakNotice
     $bubbleItem.IsChecked = [bool]$script:Cfg.bubbleOn
+    $badgeItem.IsChecked = [bool]$script:Cfg.badgeOn
     Update-RecentEventsMenu
     $script:SyncingMenu = $false
 }
@@ -1885,10 +1916,40 @@ $script:RefreshTimer.Add_Tick({
 
 function Apply-Scale {
     $size = [Math]::Round($script:BaseSize * [double]$script:Cfg.scale)
-    $window.Width = $size
-    $window.Height = $size
-    $bubbleBox.Width = $size
-    $bubbleBox.Height = [Math]::Round($size * 700 / 1026)
+    # 气泡大小 = 挂件基准尺寸 × 相对倍数（0.5–1.5）；气泡比窗口大时窗口跟着长，避免被裁掉
+    $bubbleFactor = [double]$script:Cfg.bubbleScale
+    if ($bubbleFactor -lt 0.5) { $bubbleFactor = 0.5 }
+    if ($bubbleFactor -gt 1.5) { $bubbleFactor = 1.5 }
+    $bubbleWidth = [Math]::Round($size * $bubbleFactor)
+    $bubbleHeight = [Math]::Round($bubbleWidth * 700 / 1026)
+    $newWidth = [Math]::Max($size, $bubbleWidth)
+    $newHeight = [Math]::Max($size, $bubbleHeight)
+
+    # 固定右下角：气泡/挂件放大时窗口向上、向左扩展，鲸鱼与贴边位置不动。
+    # 否则未吸附的轴仍按左上角定位，放大后整个挂件会被推出屏幕下沿。
+    $oldWidth = if ($script:WinW) { [double]$script:WinW } else { [double]$window.Width }
+    $oldHeight = if ($script:WinH) { [double]$script:WinH } else { [double]$window.Height }
+    $anchorRight = $null
+    $anchorBottom = $null
+    if (($null -ne $script:Cfg.left) -and ($null -ne $script:Cfg.top) -and
+        -not [double]::IsNaN($oldWidth) -and -not [double]::IsNaN($oldHeight)) {
+        $anchorRight = [double]$script:Cfg.left + $oldWidth
+        $anchorBottom = [double]$script:Cfg.top + $oldHeight
+    }
+
+    $window.Width = $newWidth
+    $window.Height = $newHeight
+    if ($null -ne $anchorRight) {
+        $script:Cfg.left = $anchorRight - $newWidth
+        $script:Cfg.top = $anchorBottom - $newHeight
+        $window.Left = [double]$script:Cfg.left
+        $window.Top = [double]$script:Cfg.top
+    }
+    $script:WinW = $newWidth
+    $script:WinH = $newHeight
+
+    $bubbleBox.Width = $bubbleWidth
+    $bubbleBox.Height = $bubbleHeight
     $whaleSize = [Math]::Round($size * 0.5945)
     $whaleImage.Width = $whaleSize
     $whaleImage.Height = $whaleSize
@@ -1938,6 +1999,20 @@ function Settle-Window {
     $script:Cfg.left = $left
     $script:Cfg.top = $top
     Set-Mirror
+}
+
+function Clamp-Window {
+    # 改尺寸时只保证窗口不出屏，不重新吸附：右下角尽量待在原地，
+    # 这样放大气泡时鲸鱼不会跟着往下跑（吸附状态留给下次拖动时再算）。
+    $area = [System.Windows.SystemParameters]::WorkArea
+    $width = [double]$window.Width
+    $height = [double]$window.Height
+    $left = [Math]::Max($area.Left, [Math]::Min([double]$window.Left, $area.Right - $width))
+    $top = [Math]::Max($area.Top, [Math]::Min([double]$window.Top, $area.Bottom - $height))
+    $window.Left = $left
+    $window.Top = $top
+    $script:Cfg.left = $left
+    $script:Cfg.top = $top
 }
 
 function Update-Snap {
@@ -2104,7 +2179,7 @@ $scaleSlider.Add_ValueChanged({
     if ([Math]::Abs($value - [double]$script:Cfg.scale) -lt 0.001) { return }
     $script:Cfg.scale = $value
     Apply-Scale
-    Settle-Window
+    Clamp-Window
     Save-WidgetState $script:Cfg
 })
 
@@ -2112,6 +2187,17 @@ $volumeSlider.Add_ValueChanged({
     param($sender, $eventArgs)
     if ($script:SyncingMenu) { return }
     $script:Cfg.volume = [Math]::Round([double]$eventArgs.NewValue, 2)
+    Save-WidgetState $script:Cfg
+})
+
+$bubbleScaleSlider.Add_ValueChanged({
+    param($sender, $eventArgs)
+    if ($script:SyncingMenu) { return }
+    $value = [Math]::Round([double]$eventArgs.NewValue, 2)
+    if ([Math]::Abs($value - [double]$script:Cfg.bubbleScale) -lt 0.001) { return }
+    $script:Cfg.bubbleScale = $value
+    Apply-Scale
+    Clamp-Window
     Save-WidgetState $script:Cfg
 })
 
@@ -2206,6 +2292,12 @@ $bubbleItem.Add_Click({
     $script:Cfg.bubbleOn = [bool]$bubbleItem.IsChecked
     if (-not $script:Cfg.bubbleOn) { Hide-Bubble }
     Save-WidgetState $script:Cfg
+})
+
+$badgeItem.Add_Click({
+    $script:Cfg.badgeOn = [bool]$badgeItem.IsChecked
+    Save-WidgetState $script:Cfg
+    Update-NoticeBadge
 })
 
 $closeWindowItem.Add_Click({
