@@ -350,6 +350,7 @@ $script:LastBalanceAlertAt = $null
 $script:LastBudgetAlertDate = $null
 $script:FetchFailed = $false
 $script:StatusHint = ''
+$script:FetchCode = ''
 $script:UpdateInfo = $null
 $script:LastUpdateNoticeSha = $null
 $script:UpdateTimer = $null
@@ -968,6 +969,7 @@ function Test-PeakNotice {
 function Report-FetchFailure {
     param([string]$Code, [string]$Message)
     $script:FetchFailed = $true
+    $script:FetchCode = [string]$Code
     $script:StatusHint = switch ($Code) {
         'network' { '网络异常 · 点击重试' }
         'no_api_key' { '未配置密钥 · 点击重试' }
@@ -1058,57 +1060,72 @@ function Show-ThresholdDialog {
 }
 
 function Get-NoticeAdvice {
-    # 当前角标对应的"原因 + 推荐解决办法"（取优先级最高的一个来源）
+    # 当前角标对应的"萌系原因 + 萌系小建议"（取优先级最高的一个来源）
     if ($script:NoticeReasons['fetch']) {
-        $hint = if ($script:StatusHint) { $script:StatusHint } else { '取数失败' }
-        return @{ reason = [string]$hint; solution = '检查网络或密钥；恢复后角标自动消失' }
+        switch ([string]$script:FetchCode) {
+            'network' {
+                return @{
+                    reason   = '呜...网络好像断啦，我查不到余额了...'
+                    solution = '要检查下网络吗？恢复了我自己就会安静下来~'
+                }
+            }
+            'no_api_key' {
+                return @{
+                    reason   = '呜...我找不到钥匙（密钥）了...'
+                    solution = '去 config.toml 或环境变量里给我配一把吧~'
+                }
+            }
+            default {
+                return @{
+                    reason   = '呜...我查余额的时候出错了...'
+                    solution = '点我刷新一次试试？还不行就看下 widget.log~'
+                }
+            }
+        }
     }
     if ($script:NoticeReasons['balance']) {
         $balance = if ($null -ne $script:ShownBalance) { [double]$script:ShownBalance } else { 0.0 }
         return @{
-            reason   = ('余额 ¥{0:N2} ≤ ¥{1:N2}' -f $balance, [double]$script:Cfg.balanceAlert)
-            solution = '充值，或在「告警」里调低阈值 / 关掉余额告警'
+            reason   = ('我...我的余额只剩 ¥{0:N2} 啦...（告警线 ¥{1:N2}）' -f $balance, [double]$script:Cfg.balanceAlert)
+            solution = '要充一点点钱吗？或者把告警线调低一点点...'
         }
     }
     if ($script:NoticeReasons['budget']) {
         $today = if ($null -ne $script:TodayUsage) { [double]$script:TodayUsage } else { 0.0 }
         return @{
-            reason   = ('今日 ¥{0:N2} ≥ 预算 ¥{1:N2}' -f $today, [double]$script:Cfg.dailyBudget)
-            solution = '调高今日预算阈值，或在「告警」里关掉它'
+            reason   = ('今天已经花掉 ¥{0:N2} 啦...超过预算 ¥{1:N2} 了...' -f $today, [double]$script:Cfg.dailyBudget)
+            solution = '要把预算调高一点，还是先关掉它呀？'
         }
     }
     if ($script:NoticeReasons['update']) {
         $local = if ($script:UpdateInfo) { $script:UpdateInfo.local } else { '?' }
         $remote = if ($script:UpdateInfo) { $script:UpdateInfo.remote } else { '?' }
         return @{
-            reason   = ('有新版本 {0} → {1}' -f $local, $remote)
-            solution = '托盘菜单点「有新版本」打开仓库查看'
+            reason   = ('有新版本可以换啦...{0} → {1}~' -f $local, $remote)
+            solution = '托盘菜单里点「有新版本」，我带你去看看？'
         }
     }
-    return @{ reason = '没有待处理的事件'; solution = '一切正常，无需处理' }
+    return @{ reason = '哦鲸鲸...现在没什么要操心的~'; solution = '我继续盯着余额啦，你去忙吧~' }
 }
 
 function Show-NoticeAdviceBubble {
-    # 点角标：第一次显示事件原因，再点一次显示推荐解决办法，来回切换
+    # 点角标：第一次显示萌系原因，再点一次显示萌系小建议，来回切换（不再输出标题行）
     $advice = Get-NoticeAdvice
     if ($script:BadgeView -eq 'reason') {
         $script:BadgeView = 'solution'
-        $title = '事件原因'
         $body = [string]$advice.reason
-        $hint = '再点一下看推荐解决办法'
+        $hint = '再点一下，我小声给你出主意~'
     } else {
         $script:BadgeView = 'reason'
-        $title = '推荐解决办法'
         $body = [string]$advice.solution
-        $hint = '再点一下回到事件原因'
+        $hint = '再点一下，回去看怎么回事~'
     }
     $script:RandomActive = $false
     $script:RandomLines = $null
-    Write-Log ('角标建议: ' + $title + ' / ' + $body)
+    Write-Log ('角标建议: ' + $body + ' / ' + $hint)
     Show-Bubble -Lines @(
-        @{ t = $title; s = 'A'; c = ''; w = $false },
-        @{ t = $body; s = 'C'; c = ''; w = $true },
-        @{ t = $hint; s = 'C'; c = ''; w = $false }
+        @{ t = $body; s = 'C'; c = '#536ba9'; w = $true },
+        @{ t = $hint; s = 'S'; c = ''; w = $false }
     )
 }
 
@@ -1542,6 +1559,7 @@ function Set-LineStyle {
         'B' { $Block.FontSize = 128; $Block.FontWeight = 'Bold'; $Block.Foreground = '#536ba9'; $Block.Width = [double]::NaN }
         'P' { $Block.FontSize = 104; $Block.FontWeight = 'Bold'; $Block.Foreground = '#536ba9'; $Block.Width = [double]::NaN }
         'C' { $Block.FontSize = 56; $Block.FontWeight = 'Normal'; $Block.Foreground = '#9fb0d9'; $Block.Width = [double]::NaN }
+        'S' { $Block.FontSize = 40; $Block.FontWeight = 'Normal'; $Block.Foreground = '#9fb0d9'; $Block.Width = [double]::NaN }
         default { $Block.FontSize = 66; $Block.FontWeight = 'SemiBold'; $Block.Foreground = '#536ba9'; $Block.Width = [double]::NaN }
     }
     # 行高必须跟着字号走：固定行高（原来的 134）配 66 号字的换行文案会撑高一大截，
